@@ -36,6 +36,9 @@ public class RTSController : MonoBehaviour
     private GameObject resourceTargetCircle;
     private ResourceNode currentResourceTarget;
 
+    private GameObject depotTargetCircle;
+    private ResourceDepot currentSelectedDepot;
+
     private bool isAttackMoveMode = false;
 
     private List<Unit> selectedUnits = new List<Unit>();
@@ -98,9 +101,18 @@ public class RTSController : MonoBehaviour
         Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
 
         ClearSelection();
+        ClearSelectedDepotCircle();
 
         if (Physics.Raycast(ray, out RaycastHit hit))
         {
+            ResourceDepot depot = hit.collider.GetComponentInParent<ResourceDepot>();
+
+            if (depot != null)
+            {
+                ShowSelectedDepotCircle(depot);
+                return;
+            }
+
             Unit unit = hit.collider.GetComponentInParent<Unit>();
 
             if (unit != null && !unit.IsDead() && unit.team == UnitTeam.Player)
@@ -114,6 +126,7 @@ public class RTSController : MonoBehaviour
     private void SelectUnitsInDragBox()
     {
         ClearSelection();
+        ClearSelectedDepotCircle();
 
         Rect selectionRect = GetScreenRect(dragStartPosition, dragEndPosition);
 
@@ -671,6 +684,10 @@ public class RTSController : MonoBehaviour
                 "Selected Mineral: " + currentResourceTarget.CurrentAmount + " / " + currentResourceTarget.maxAmount
             );
         }
+        if (currentSelectedDepot != null)
+        {
+            GUI.Label(new Rect(20, 125, 300, 30), "Selected Base: " + currentSelectedDepot.depotName);
+        }
     }
 
     private Rect GetScreenRectForGUI(Vector3 start, Vector3 end)
@@ -692,10 +709,18 @@ public class RTSController : MonoBehaviour
 
         List<Unit> gatherUnits = new List<Unit>(selectedUnits);
 
-        gatherUnits.RemoveAll(unit => unit == null || unit.IsDead() || !unit.canGather);
+        gatherUnits.RemoveAll(unit => unit == null || unit.IsDead() || !unit.CanGatherResource());
 
         if (gatherUnits.Count == 0 || resourceNode == null || resourceNode.IsEmpty())
         {
+            return;
+        }
+
+        ResourceDepot depot = FindNearestDepot(resourceNode.transform.position);
+
+        if (depot == null)
+        {
+            Debug.LogWarning("No ResourceDepot found. Please create CommandCenter with ResourceDepot.");
             return;
         }
 
@@ -707,20 +732,37 @@ public class RTSController : MonoBehaviour
             return distanceA.CompareTo(distanceB);
         });
 
-        List<Vector3> availableOffsets = GenerateResourceGatherOffsets(resourceNode, gatherUnits);
-        List<Vector3> usedOffsets = new List<Vector3>();
+        List<Vector3> resourceOffsets = GenerateResourceGatherOffsets(resourceNode, gatherUnits);
+        List<Vector3> depotOffsets = GenerateDepotOffsets(depot, gatherUnits);
+
+        List<Vector3> usedResourceOffsets = new List<Vector3>();
+        List<Vector3> usedDepotOffsets = new List<Vector3>();
 
         foreach (Unit unit in gatherUnits)
         {
-            Vector3 bestOffset = FindBestResourceGatherOffset(
+            Vector3 resourceOffset = FindBestResourceGatherOffset(
                 unit,
                 resourceNode,
-                availableOffsets,
-                usedOffsets
+                resourceOffsets,
+                usedResourceOffsets
             );
 
-            usedOffsets.Add(bestOffset);
-            unit.GatherResource(resourceNode, bestOffset);
+            Vector3 depotOffset = FindBestDepotOffset(
+                unit,
+                depot,
+                depotOffsets,
+                usedDepotOffsets
+            );
+
+            usedResourceOffsets.Add(resourceOffset);
+            usedDepotOffsets.Add(depotOffset);
+
+            unit.GatherResource(
+                resourceNode,
+                depot,
+                resourceOffset,
+                depotOffset
+            );
         }
     }
 
@@ -734,8 +776,8 @@ public class RTSController : MonoBehaviour
         }
 
         float unitRadius = gatherUnits[0].collisionRadius;
-        float baseRadius = resourceNode.collisionRadius + unitRadius + 0.25f;
-        float ringSpacing = unitRadius * 2f * 1.2f;
+        float baseRadius = resourceNode.collisionRadius + unitRadius + 0.05f;
+        float ringSpacing = unitRadius * 2f * 1.15f;
         int maxGatherRing = Mathf.Max(2, Mathf.CeilToInt(gatherUnits.Count / 6f) + 2);
 
         for (int ring = 0; ring < maxGatherRing; ring++)
@@ -793,6 +835,36 @@ public class RTSController : MonoBehaviour
         return bestOffset;
     }
 
+    private Vector3 FindBestDepotOffset(
+        Unit unit,
+        ResourceDepot depot,
+        List<Vector3> availableOffsets,
+        List<Vector3> usedOffsets
+    )
+    {
+        Vector3 bestOffset = Vector3.zero;
+        float bestDistance = Mathf.Infinity;
+
+        foreach (Vector3 offset in availableOffsets)
+        {
+            if (usedOffsets.Contains(offset))
+            {
+                continue;
+            }
+
+            Vector3 worldPosition = depot.transform.position + offset;
+            float distance = Vector3.Distance(unit.transform.position, worldPosition);
+
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestOffset = offset;
+            }
+        }
+
+        return bestOffset;
+    }
+
     private void ShowResourceTargetCircle(ResourceNode target)
     {
         ClearResourceTargetCircle();
@@ -805,7 +877,6 @@ public class RTSController : MonoBehaviour
         currentResourceTarget = target;
 
         resourceTargetCircle = new GameObject("ResourceTargetCircle");
-        resourceTargetCircle.transform.SetParent(target.transform);
         resourceTargetCircle.transform.position = new Vector3(
             target.transform.position.x,
             resourceTargetCircleHeight,
@@ -815,7 +886,7 @@ public class RTSController : MonoBehaviour
 
         LineRenderer lineRenderer = resourceTargetCircle.AddComponent<LineRenderer>();
 
-        lineRenderer.useWorldSpace = false;
+        lineRenderer.useWorldSpace = true;
         lineRenderer.loop = true;
         lineRenderer.positionCount = 64;
         lineRenderer.widthMultiplier = resourceTargetCircleWidth;
@@ -833,7 +904,14 @@ public class RTSController : MonoBehaviour
             float x = Mathf.Cos(angle) * radius;
             float z = Mathf.Sin(angle) * radius;
 
-            lineRenderer.SetPosition(i, new Vector3(x, 0f, z));
+            lineRenderer.SetPosition(
+                i,
+                new Vector3(
+                    target.transform.position.x + x,
+                    resourceTargetCircleHeight,
+                    target.transform.position.z + z
+                )
+            );
         }
     }
 
@@ -856,4 +934,127 @@ public class RTSController : MonoBehaviour
         }
     }
 
+    private ResourceDepot FindNearestDepot(Vector3 fromPosition)
+    {
+        ResourceDepot[] depots = FindObjectsByType<ResourceDepot>(FindObjectsSortMode.None);
+
+        ResourceDepot nearestDepot = null;
+        float nearestDistance = Mathf.Infinity;
+
+        foreach (ResourceDepot depot in depots)
+        {
+            if (depot == null)
+            {
+                continue;
+            }
+
+            if (depot.team != UnitTeam.Player)
+            {
+                continue;
+            }
+
+            float distance = Vector3.Distance(fromPosition, depot.transform.position);
+
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearestDepot = depot;
+            }
+        }
+
+        return nearestDepot;
+    }
+
+    private List<Vector3> GenerateDepotOffsets(ResourceDepot depot, List<Unit> units)
+    {
+        List<Vector3> offsets = new List<Vector3>();
+
+        if (depot == null)
+        {
+            return offsets;
+        }
+
+        float unitRadius = 0.6f;
+
+        if (units.Count > 0)
+        {
+            unitRadius = units[0].collisionRadius;
+        }
+
+        float baseRadius = depot.collisionRadius + unitRadius + 0.1f;
+
+        for (int i = 0; i < units.Count; i++)
+        {
+            float angle = Mathf.PI * 2f * i / units.Count;
+
+            Vector3 offset = new Vector3(
+                Mathf.Cos(angle) * baseRadius,
+                0f,
+                Mathf.Sin(angle) * baseRadius
+            );
+
+            offsets.Add(offset);
+        }
+
+        return offsets;
+    }
+
+    private void ShowSelectedDepotCircle(ResourceDepot depot)
+    {
+        ClearSelectedDepotCircle();
+
+        if (depot == null)
+        {
+            return;
+        }
+
+        currentSelectedDepot = depot;
+
+        depotTargetCircle = new GameObject("DepotSelectionCircle");
+        depotTargetCircle.transform.position = new Vector3(
+            depot.transform.position.x,
+            0.08f,
+            depot.transform.position.z
+        );
+        depotTargetCircle.transform.rotation = Quaternion.identity;
+
+        LineRenderer lineRenderer = depotTargetCircle.AddComponent<LineRenderer>();
+        lineRenderer.useWorldSpace = true;
+        lineRenderer.loop = true;
+        lineRenderer.positionCount = 64;
+        lineRenderer.widthMultiplier = 0.1f;
+
+        Material material = new Material(Shader.Find("Sprites/Default"));
+        material.color = Color.cyan;
+        lineRenderer.material = material;
+
+        float radius = depot.collisionRadius + 0.45f;
+
+        for (int i = 0; i < 64; i++)
+        {
+            float angle = Mathf.PI * 2f * i / 64f;
+            float x = Mathf.Cos(angle) * radius;
+            float z = Mathf.Sin(angle) * radius;
+
+            lineRenderer.SetPosition(
+                i,
+                new Vector3(
+                    depot.transform.position.x + x,
+                    0.08f,
+                    depot.transform.position.z + z
+                )
+            );
+        }
+    }
+
+    private void ClearSelectedDepotCircle()
+    {
+        if (depotTargetCircle != null)
+        {
+            Destroy(depotTargetCircle);
+        }
+
+        depotTargetCircle = null;
+        currentSelectedDepot = null;
+    }
 }

@@ -6,13 +6,20 @@ public enum UnitTeam
     Enemy
 }
 
+public enum UnitRole
+{
+    Soldier,
+    Worker
+}
+
 public enum UnitCommandState
 {
     Idle,
     Move,
     AttackTarget,
     AttackMove,
-    GatherResource
+    GatherResource,
+    ReturnResource
 }
 
 [RequireComponent(typeof(CapsuleCollider))]
@@ -21,6 +28,9 @@ public class Unit : MonoBehaviour
 {
     [Header("Team Settings")]
     public UnitTeam team = UnitTeam.Player;
+
+    [Header("Role Settings")]
+    public UnitRole role = UnitRole.Soldier;
 
     [Header("Move Settings")]
     public float moveSpeed = 5f;
@@ -38,8 +48,11 @@ public class Unit : MonoBehaviour
 
     [Header("Gather Settings")]
     public bool canGather = true;
+    public float resourceSearchRange = 10f;
     public int gatherAmount = 5;
+    public int carryCapacity = 20;
     public float gatherRange = 1.8f;
+    public float depositRange = 2.0f;
     public float gatherCooldown = 1f;
 
     [Header("Selection Circle")]
@@ -54,8 +67,13 @@ public class Unit : MonoBehaviour
     private Vector3 attackMoveDestination;
 
     private ResourceNode resourceTarget;
+    private ResourceDepot depotTarget;
+
     private Vector3 gatherOffsetFromResource;
+    private Vector3 depositOffsetFromDepot;
+
     private float gatherTimer = 0f;
+    private int carriedMinerals = 0;
 
     private Vector3 targetPosition;
     private bool isMoving = false;
@@ -74,6 +92,14 @@ public class Unit : MonoBehaviour
         attackMoveDestination = transform.position;
 
         rb = GetComponent<Rigidbody>();
+
+        // 如果场景里的对象名字是 Worker / Worker (1) / Worker (2)，
+        // 运行时自动识别成工人，避免 Inspector 里 Role 还保持 Soldier 时无法采集。
+        if (gameObject.name.Contains("Worker"))
+        {
+            role = UnitRole.Worker;
+            canGather = true;
+        }
 
         SetupRigidbody();
         SetupCollider();
@@ -120,10 +146,18 @@ public class Unit : MonoBehaviour
         {
             if (resourceTarget == null || resourceTarget.IsEmpty())
             {
-                commandState = UnitCommandState.Idle;
-                resourceTarget = null;
-                isMoving = false;
-                rb.linearVelocity = Vector3.zero;
+                if (carriedMinerals > 0 && depotTarget != null)
+                {
+                    BeginReturnToDepot();
+                }
+                else if (!TrySwitchToNearbyResource())
+                {
+                    commandState = UnitCommandState.Idle;
+                    resourceTarget = null;
+                    isMoving = false;
+                    rb.linearVelocity = Vector3.zero;
+                }
+
                 return;
             }
 
@@ -171,6 +205,12 @@ public class Unit : MonoBehaviour
         if (commandState == UnitCommandState.GatherResource)
         {
             HandleGatherCommand();
+            return;
+        }
+
+        if (commandState == UnitCommandState.ReturnResource)
+        {
+            HandleReturnResourceCommand();
             return;
         }
 
@@ -287,20 +327,33 @@ public class Unit : MonoBehaviour
     {
         if (resourceTarget == null || resourceTarget.IsEmpty())
         {
+            if (carriedMinerals > 0)
+            {
+                BeginReturnToDepot();
+                return;
+            }
+
+            if (TrySwitchToNearbyResource())
+            {
+                return;
+            }
+
             resourceTarget = null;
             commandState = UnitCommandState.Idle;
             isMoving = false;
-            rb.linearVelocity = Vector3.zero;
             return;
         }
 
-        Vector3 gatherPosition = GetCurrentGatherPosition();
-        float distanceToGatherPosition = GetXZDistance(transform.position, gatherPosition);
-        float distanceToResource = GetXZDistance(transform.position, resourceTarget.transform.position);
+        if (carriedMinerals >= carryCapacity)
+        {
+            BeginReturnToDepot();
+            return;
+        }
+
+        float distance = GetXZDistance(transform.position, resourceTarget.transform.position);
         float effectiveGatherRange = GetEffectiveGatherRange();
 
-        if (distanceToGatherPosition <= Mathf.Max(stopDistance * 4f, collisionRadius * 0.75f) ||
-            distanceToResource <= effectiveGatherRange)
+        if (distance <= effectiveGatherRange)
         {
             isMoving = false;
             rb.linearVelocity = Vector3.zero;
@@ -309,19 +362,100 @@ public class Unit : MonoBehaviour
 
             if (gatherTimer <= 0f)
             {
-                int gatheredAmount = resourceTarget.TakeResource(gatherAmount);
+                int needAmount = carryCapacity - carriedMinerals;
+                int takeAmount = Mathf.Min(gatherAmount, needAmount);
 
-                if (PlayerResources.Instance != null)
-                {
-                    PlayerResources.Instance.AddMinerals(gatheredAmount);
-                }
+                int gatheredAmount = resourceTarget.TakeResource(takeAmount);
+                carriedMinerals += gatheredAmount;
 
                 gatherTimer = gatherCooldown;
+
+                if (carriedMinerals >= carryCapacity || resourceTarget == null || resourceTarget.IsEmpty())
+                {
+                    BeginReturnToDepot();
+                }
             }
         }
         else
         {
-            targetPosition = gatherPosition;
+            targetPosition = resourceTarget.transform.position + gatherOffsetFromResource;
+            targetPosition.y = transform.position.y;
+            isMoving = true;
+        }
+    }
+
+    private void BeginReturnToDepot()
+    {
+        if (depotTarget == null)
+        {
+            Debug.LogWarning(gameObject.name + " has no depot target.");
+            commandState = UnitCommandState.Idle;
+            isMoving = false;
+            return;
+        }
+
+        targetPosition = depotTarget.transform.position + depositOffsetFromDepot;
+        targetPosition.y = transform.position.y;
+
+        commandState = UnitCommandState.ReturnResource;
+        isMoving = true;
+    }
+
+    private void HandleReturnResourceCommand()
+    {
+        if (carriedMinerals <= 0)
+        {
+            commandState = UnitCommandState.Idle;
+            isMoving = false;
+            return;
+        }
+
+        if (depotTarget == null)
+        {
+            Debug.LogWarning(gameObject.name + " cannot find depot.");
+            commandState = UnitCommandState.Idle;
+            isMoving = false;
+            return;
+        }
+
+        float distance = GetXZDistance(transform.position, depotTarget.transform.position);
+
+        if (distance <= GetEffectiveDepositRange())
+        {
+            isMoving = false;
+            rb.linearVelocity = Vector3.zero;
+
+            LookAtTarget(depotTarget.transform.position);
+
+            if (PlayerResources.Instance != null)
+            {
+                PlayerResources.Instance.AddMinerals(carriedMinerals);
+            }
+
+            carriedMinerals = 0;
+
+            if (resourceTarget != null && !resourceTarget.IsEmpty())
+            {
+                commandState = UnitCommandState.GatherResource;
+                targetPosition = resourceTarget.transform.position + gatherOffsetFromResource;
+                targetPosition.y = transform.position.y;
+                isMoving = true;
+            }
+            else if (TrySwitchToNearbyResource())
+            {
+                return;
+            }
+            else
+            {
+                resourceTarget = null;
+                commandState = UnitCommandState.Idle;
+                isMoving = false;
+            }
+        }
+        else
+        {
+            targetPosition = depotTarget.transform.position + depositOffsetFromDepot;
+            targetPosition.y = transform.position.y;
             isMoving = true;
         }
     }
@@ -347,7 +481,20 @@ public class Unit : MonoBehaviour
 
         return Mathf.Max(
             gatherRange,
-            resourceTarget.collisionRadius + collisionRadius + 0.35f
+            resourceTarget.collisionRadius + collisionRadius + 0.85f
+        );
+    }
+
+    private float GetEffectiveDepositRange()
+    {
+        if (depotTarget == null)
+        {
+            return depositRange;
+        }
+
+        return Mathf.Max(
+            depositRange,
+            depotTarget.collisionRadius + collisionRadius + 0.85f
         );
     }
 
@@ -429,12 +576,18 @@ public class Unit : MonoBehaviour
         isMoving = true;
         attackTarget = null;
         resourceTarget = null;
+        depotTarget = null;
         commandState = UnitCommandState.Move;
     }
 
-    public void GatherResource(ResourceNode target, Vector3 offsetFromResource)
+    public void GatherResource(
+    ResourceNode target,
+    ResourceDepot depot,
+    Vector3 offsetFromResource,
+    Vector3 offsetFromDepot
+)
     {
-        if (!canGather)
+        if (!CanGatherResource())
         {
             return;
         }
@@ -444,10 +597,19 @@ public class Unit : MonoBehaviour
             return;
         }
 
+        if (depot == null)
+        {
+            Debug.LogWarning("No ResourceDepot found.");
+            return;
+        }
+
         CancelMoveCommandLine();
 
         resourceTarget = target;
+        depotTarget = depot;
+
         gatherOffsetFromResource = offsetFromResource;
+        depositOffsetFromDepot = offsetFromDepot;
 
         attackTarget = null;
         commandState = UnitCommandState.GatherResource;
@@ -466,6 +628,7 @@ public class Unit : MonoBehaviour
         targetPosition = position;
         attackTarget = null;
         resourceTarget = null;
+        depotTarget = null;
 
         isMoving = true;
         commandState = UnitCommandState.AttackMove;
@@ -482,12 +645,14 @@ public class Unit : MonoBehaviour
 
         attackTarget = target;
         attackOffsetFromTarget = offsetFromTarget;
-        resourceTarget = null;
 
         commandState = UnitCommandState.AttackTarget;
 
         targetPosition = attackTarget.transform.position + attackOffsetFromTarget;
         targetPosition.y = transform.position.y;
+
+        resourceTarget = null;
+        depotTarget = null;
 
         isMoving = true;
     }
@@ -505,6 +670,21 @@ public class Unit : MonoBehaviour
     public float GetHpPercent()
     {
         return (float)currentHp / maxHp;
+    }
+
+    public bool IsWorker()
+    {
+        return role == UnitRole.Worker;
+    }
+
+    public bool CanGatherResource()
+    {
+        return team == UnitTeam.Player && canGather && role == UnitRole.Worker;
+    }
+
+    public int GetCarriedMinerals()
+    {
+        return carriedMinerals;
     }
 
     private void Attack(Unit target)
@@ -601,6 +781,73 @@ public class Unit : MonoBehaviour
         Vector2 posB = new Vector2(b.x, b.z);
 
         return Vector2.Distance(posA, posB);
+    }
+
+    private ResourceNode FindNearestAvailableResource(Vector3 fromPosition, float searchRange)
+    {
+        ResourceNode[] allResources = FindObjectsByType<ResourceNode>(FindObjectsSortMode.None);
+
+        ResourceNode nearest = null;
+        float nearestDistance = Mathf.Infinity;
+
+        foreach (ResourceNode node in allResources)
+        {
+            if (node == null || node.IsEmpty())
+            {
+                continue;
+            }
+
+            float distance = GetXZDistance(fromPosition, node.transform.position);
+
+            if (distance <= searchRange && distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = node;
+            }
+        }
+
+        return nearest;
+    }
+
+    private bool TrySwitchToNearbyResource()
+    {
+        ResourceNode nextResource = FindNearestAvailableResource(transform.position, resourceSearchRange);
+
+        if (nextResource == null)
+        {
+            return false;
+        }
+
+        resourceTarget = nextResource;
+        gatherOffsetFromResource = GetDefaultGatherOffset(nextResource);
+
+        commandState = UnitCommandState.GatherResource;
+        targetPosition = resourceTarget.transform.position + gatherOffsetFromResource;
+        targetPosition.y = transform.position.y;
+        isMoving = true;
+
+        return true;
+    }
+
+    private Vector3 GetDefaultGatherOffset(ResourceNode node)
+    {
+        if (node == null)
+        {
+            return Vector3.zero;
+        }
+
+        Vector3 direction = transform.position - node.transform.position;
+        direction.y = 0f;
+
+        if (direction.sqrMagnitude < 0.01f)
+        {
+            direction = Vector3.forward;
+        }
+
+        direction.Normalize();
+
+        float distance = node.collisionRadius + collisionRadius + 0.05f;
+        return direction * distance;
     }
 
     private void SetupRigidbody()
