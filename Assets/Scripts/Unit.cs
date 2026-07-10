@@ -1,9 +1,26 @@
 using UnityEngine;
 
+public enum UnitTeam
+{
+    Player,
+    Enemy
+}
+
+public enum UnitCommandState
+{
+    Idle,
+    Move,
+    AttackTarget,
+    AttackMove
+}
+
 [RequireComponent(typeof(CapsuleCollider))]
 [RequireComponent(typeof(Rigidbody))]
 public class Unit : MonoBehaviour
 {
+    [Header("Team Settings")]
+    public UnitTeam team = UnitTeam.Player;
+
     [Header("Move Settings")]
     public float moveSpeed = 5f;
     public float stopDistance = 0.08f;
@@ -11,27 +28,53 @@ public class Unit : MonoBehaviour
     [Header("Collision Settings")]
     public float collisionRadius = 0.6f;
 
+    [Header("Battle Settings")]
+    public int maxHp = 100;
+    public int attackDamage = 10;
+    public float attackRange = 2f;
+    public float detectRange = 5f;
+    public float attackCooldown = 1f;
+
     [Header("Selection Circle")]
     public float selectionCircleRadius = 0.7f;
     public float selectionCircleHeight = -0.95f;
 
+    private int currentHp;
+    private float attackTimer = 0f;
+
+    private Unit attackTarget;
+    private Vector3 attackOffsetFromTarget;
+    private Vector3 attackMoveDestination;
+
     private Vector3 targetPosition;
     private bool isMoving = false;
+
+    private UnitCommandState commandState = UnitCommandState.Idle;
 
     private Rigidbody rb;
     private GameObject selectionCircle;
     private MoveCommandLine currentMoveCommandLine;
+    private DamageFlash damageFlash;
 
     private void Start()
     {
+        currentHp = maxHp;
         targetPosition = transform.position;
+        attackMoveDestination = transform.position;
 
         rb = GetComponent<Rigidbody>();
 
         SetupRigidbody();
         SetupCollider();
         CreateSelectionCircle();
+        EnsureHealthBar();
+        EnsureDamageFlash();
         SetSelected(false);
+    }
+
+    private void Update()
+    {
+        HandleAttack();
     }
 
     private void FixedUpdate()
@@ -47,6 +90,21 @@ public class Unit : MonoBehaviour
             return;
         }
 
+        if (commandState == UnitCommandState.AttackTarget)
+        {
+            if (attackTarget == null || attackTarget.IsDead())
+            {
+                commandState = UnitCommandState.Idle;
+                attackTarget = null;
+                isMoving = false;
+                rb.linearVelocity = Vector3.zero;
+                return;
+            }
+
+            targetPosition = attackTarget.transform.position + attackOffsetFromTarget;
+            targetPosition.y = transform.position.y;
+        }
+
         Vector3 currentPosition = rb.position;
         Vector3 direction = targetPosition - currentPosition;
         direction.y = 0f;
@@ -57,6 +115,18 @@ public class Unit : MonoBehaviour
         {
             isMoving = false;
             rb.linearVelocity = Vector3.zero;
+
+            if (commandState == UnitCommandState.Move)
+            {
+                commandState = UnitCommandState.Idle;
+            }
+
+            if (commandState == UnitCommandState.AttackMove &&
+                GetXZDistance(transform.position, attackMoveDestination) <= stopDistance * 2f)
+            {
+                commandState = UnitCommandState.Idle;
+            }
+
             return;
         }
 
@@ -68,16 +138,284 @@ public class Unit : MonoBehaviour
         rb.MovePosition(nextPosition);
     }
 
+    private void HandleAttack()
+    {
+        attackTimer -= Time.deltaTime;
+
+        if (commandState == UnitCommandState.Move)
+        {
+            attackTarget = null;
+            return;
+        }
+
+        if (commandState == UnitCommandState.AttackTarget)
+        {
+            HandleAttackTargetCommand();
+            return;
+        }
+
+        if (commandState == UnitCommandState.AttackMove)
+        {
+            HandleAttackMoveCommand();
+            return;
+        }
+
+        HandleAutoAttack();
+    }
+
+    private void HandleAttackTargetCommand()
+    {
+        if (attackTarget == null || attackTarget.IsDead())
+        {
+            attackTarget = null;
+            commandState = UnitCommandState.Idle;
+            isMoving = false;
+            return;
+        }
+
+        float distance = GetXZDistance(transform.position, attackTarget.transform.position);
+
+        if (distance <= attackRange)
+        {
+            isMoving = false;
+            rb.linearVelocity = Vector3.zero;
+
+            LookAtTarget(attackTarget.transform.position);
+
+            if (attackTimer <= 0f)
+            {
+                Attack(attackTarget);
+            }
+        }
+        else
+        {
+            targetPosition = attackTarget.transform.position + attackOffsetFromTarget;
+            targetPosition.y = transform.position.y;
+            isMoving = true;
+        }
+    }
+
+    private void HandleAttackMoveCommand()
+    {
+        if (attackTarget == null || attackTarget.IsDead())
+        {
+            attackTarget = FindNearestEnemy();
+        }
+
+        if (attackTarget == null)
+        {
+            targetPosition = attackMoveDestination;
+            targetPosition.y = transform.position.y;
+
+            if (GetXZDistance(transform.position, attackMoveDestination) <= stopDistance * 2f)
+            {
+                isMoving = false;
+                commandState = UnitCommandState.Idle;
+            }
+            else
+            {
+                isMoving = true;
+            }
+
+            return;
+        }
+
+        float distance = GetXZDistance(transform.position, attackTarget.transform.position);
+
+        if (distance > detectRange)
+        {
+            attackTarget = null;
+            targetPosition = attackMoveDestination;
+            targetPosition.y = transform.position.y;
+            isMoving = true;
+            return;
+        }
+
+        if (distance <= attackRange)
+        {
+            isMoving = false;
+            rb.linearVelocity = Vector3.zero;
+
+            LookAtTarget(attackTarget.transform.position);
+
+            if (attackTimer <= 0f)
+            {
+                Attack(attackTarget);
+            }
+        }
+        else
+        {
+            targetPosition = attackTarget.transform.position;
+            targetPosition.y = transform.position.y;
+            isMoving = true;
+        }
+    }
+
+    private void HandleAutoAttack()
+    {
+        if (attackTarget == null || attackTarget.IsDead())
+        {
+            attackTarget = FindNearestEnemy();
+        }
+
+        if (attackTarget == null)
+        {
+            return;
+        }
+
+        float distance = GetXZDistance(transform.position, attackTarget.transform.position);
+
+        if (distance > detectRange)
+        {
+            attackTarget = null;
+            return;
+        }
+
+        if (distance <= attackRange)
+        {
+            isMoving = false;
+            rb.linearVelocity = Vector3.zero;
+
+            LookAtTarget(attackTarget.transform.position);
+
+            if (attackTimer <= 0f)
+            {
+                Attack(attackTarget);
+            }
+        }
+    }
+
+    private Unit FindNearestEnemy()
+    {
+        Unit[] allUnits = FindObjectsByType<Unit>(FindObjectsSortMode.None);
+
+        Unit nearestEnemy = null;
+        float nearestDistance = Mathf.Infinity;
+
+        foreach (Unit unit in allUnits)
+        {
+            if (unit == this)
+            {
+                continue;
+            }
+
+            if (unit == null || unit.IsDead())
+            {
+                continue;
+            }
+
+            if (unit.team == team)
+            {
+                continue;
+            }
+
+            float distance = GetXZDistance(transform.position, unit.transform.position);
+
+            if (distance < nearestDistance && distance <= detectRange)
+            {
+                nearestDistance = distance;
+                nearestEnemy = unit;
+            }
+        }
+
+        return nearestEnemy;
+    }
+
     public void MoveTo(Vector3 position)
     {
         position.y = transform.position.y;
+
         targetPosition = position;
+        isMoving = true;
+        attackTarget = null;
+        commandState = UnitCommandState.Move;
+    }
+
+    public void AttackMoveTo(Vector3 position)
+    {
+        position.y = transform.position.y;
+
+        attackMoveDestination = position;
+        targetPosition = position;
+        attackTarget = null;
+
+        isMoving = true;
+        commandState = UnitCommandState.AttackMove;
+    }
+
+    public void AttackUnit(Unit target, Vector3 offsetFromTarget)
+    {
+        if (target == null || target.IsDead())
+        {
+            return;
+        }
+
+        CancelMoveCommandLine();
+
+        attackTarget = target;
+        attackOffsetFromTarget = offsetFromTarget;
+
+        commandState = UnitCommandState.AttackTarget;
+
+        targetPosition = attackTarget.transform.position + attackOffsetFromTarget;
+        targetPosition.y = transform.position.y;
+
         isMoving = true;
     }
 
     public bool IsMoving()
     {
         return isMoving;
+    }
+
+    public bool IsDead()
+    {
+        return currentHp <= 0;
+    }
+
+    public float GetHpPercent()
+    {
+        return (float)currentHp / maxHp;
+    }
+
+    private void Attack(Unit target)
+    {
+        if (target == null || target.IsDead())
+        {
+            return;
+        }
+
+        CancelMoveCommandLine();
+
+        AttackEffect.Create(transform.position, target.transform.position);
+
+        target.TakeDamage(attackDamage);
+        attackTimer = attackCooldown;
+    }
+
+    public void TakeDamage(int damage)
+    {
+        currentHp -= damage;
+        currentHp = Mathf.Clamp(currentHp, 0, maxHp);
+
+        if (damageFlash != null)
+        {
+            damageFlash.Flash();
+        }
+
+        if (currentHp <= 0)
+        {
+            Die();
+        }
+    }
+
+    private void Die()
+    {
+        CancelMoveCommandLine();
+
+        DeathEffect.Create(transform.position, team);
+
+        Destroy(gameObject);
     }
 
     public void SetMoveCommandLine(MoveCommandLine newLine)
@@ -97,12 +435,43 @@ public class Unit : MonoBehaviour
             currentMoveCommandLine = null;
         }
     }
+
+    private void CancelMoveCommandLine()
+    {
+        if (currentMoveCommandLine != null)
+        {
+            Destroy(currentMoveCommandLine.gameObject);
+            currentMoveCommandLine = null;
+        }
+    }
+
     public void SetSelected(bool selected)
     {
         if (selectionCircle != null)
         {
             selectionCircle.SetActive(selected);
         }
+    }
+
+    private void LookAtTarget(Vector3 target)
+    {
+        Vector3 direction = target - transform.position;
+        direction.y = 0f;
+
+        if (direction.sqrMagnitude <= 0.01f)
+        {
+            return;
+        }
+
+        transform.rotation = Quaternion.LookRotation(direction);
+    }
+
+    private float GetXZDistance(Vector3 a, Vector3 b)
+    {
+        Vector2 posA = new Vector2(a.x, a.z);
+        Vector2 posB = new Vector2(b.x, b.z);
+
+        return Vector2.Distance(posA, posB);
     }
 
     private void SetupRigidbody()
@@ -125,6 +494,24 @@ public class Unit : MonoBehaviour
         capsuleCollider.height = 2f;
         capsuleCollider.center = Vector3.zero;
         capsuleCollider.isTrigger = false;
+    }
+
+    private void EnsureHealthBar()
+    {
+        if (GetComponent<UnitHealthBar>() == null)
+        {
+            gameObject.AddComponent<UnitHealthBar>();
+        }
+    }
+
+    private void EnsureDamageFlash()
+    {
+        damageFlash = GetComponent<DamageFlash>();
+
+        if (damageFlash == null)
+        {
+            damageFlash = gameObject.AddComponent<DamageFlash>();
+        }
     }
 
     private void CreateSelectionCircle()
@@ -154,5 +541,4 @@ public class Unit : MonoBehaviour
             lineRenderer.SetPosition(i, new Vector3(x, 0f, z));
         }
     }
-
 }
