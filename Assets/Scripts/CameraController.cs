@@ -30,20 +30,20 @@ public class CameraController : MonoBehaviour
         float horizontal = 0f;
         float vertical = 0f;
 
-        if (Input.GetKey(KeyCode.A))
+        if (Input.GetKey(KeyCode.LeftArrow))
         {
             horizontal = -1f;
         }
-        else if (Input.GetKey(KeyCode.D))
+        else if (Input.GetKey(KeyCode.RightArrow))
         {
             horizontal = 1f;
         }
 
-        if (Input.GetKey(KeyCode.W))
+        if (Input.GetKey(KeyCode.UpArrow))
         {
             vertical = 1f;
         }
-        else if (Input.GetKey(KeyCode.S))
+        else if (Input.GetKey(KeyCode.DownArrow))
         {
             vertical = -1f;
         }
@@ -58,23 +58,19 @@ public class CameraController : MonoBehaviour
         float horizontal = 0f;
         float vertical = 0f;
 
-        // 鼠标靠近左边
         if (mousePosition.x <= edgeSize)
         {
             horizontal = -1f;
         }
-        // 鼠标靠近右边
         else if (mousePosition.x >= Screen.width - edgeSize)
         {
             horizontal = 1f;
         }
 
-        // 鼠标靠近下边
         if (mousePosition.y <= edgeSize)
         {
             vertical = -1f;
         }
-        // 鼠标靠近上边
         else if (mousePosition.y >= Screen.height - edgeSize)
         {
             vertical = 1f;

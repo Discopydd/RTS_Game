@@ -11,7 +11,8 @@ public enum UnitCommandState
     Idle,
     Move,
     AttackTarget,
-    AttackMove
+    AttackMove,
+    GatherResource
 }
 
 [RequireComponent(typeof(CapsuleCollider))]
@@ -35,6 +36,12 @@ public class Unit : MonoBehaviour
     public float detectRange = 5f;
     public float attackCooldown = 1f;
 
+    [Header("Gather Settings")]
+    public bool canGather = true;
+    public int gatherAmount = 5;
+    public float gatherRange = 1.8f;
+    public float gatherCooldown = 1f;
+
     [Header("Selection Circle")]
     public float selectionCircleRadius = 0.7f;
     public float selectionCircleHeight = -0.95f;
@@ -45,6 +52,10 @@ public class Unit : MonoBehaviour
     private Unit attackTarget;
     private Vector3 attackOffsetFromTarget;
     private Vector3 attackMoveDestination;
+
+    private ResourceNode resourceTarget;
+    private Vector3 gatherOffsetFromResource;
+    private float gatherTimer = 0f;
 
     private Vector3 targetPosition;
     private bool isMoving = false;
@@ -105,6 +116,20 @@ public class Unit : MonoBehaviour
             targetPosition.y = transform.position.y;
         }
 
+        if (commandState == UnitCommandState.GatherResource)
+        {
+            if (resourceTarget == null || resourceTarget.IsEmpty())
+            {
+                commandState = UnitCommandState.Idle;
+                resourceTarget = null;
+                isMoving = false;
+                rb.linearVelocity = Vector3.zero;
+                return;
+            }
+
+            targetPosition = GetCurrentGatherPosition();
+        }
+
         Vector3 currentPosition = rb.position;
         Vector3 direction = targetPosition - currentPosition;
         direction.y = 0f;
@@ -141,6 +166,13 @@ public class Unit : MonoBehaviour
     private void HandleAttack()
     {
         attackTimer -= Time.deltaTime;
+        gatherTimer -= Time.deltaTime;
+
+        if (commandState == UnitCommandState.GatherResource)
+        {
+            HandleGatherCommand();
+            return;
+        }
 
         if (commandState == UnitCommandState.Move)
         {
@@ -251,6 +283,74 @@ public class Unit : MonoBehaviour
         }
     }
 
+    private void HandleGatherCommand()
+    {
+        if (resourceTarget == null || resourceTarget.IsEmpty())
+        {
+            resourceTarget = null;
+            commandState = UnitCommandState.Idle;
+            isMoving = false;
+            rb.linearVelocity = Vector3.zero;
+            return;
+        }
+
+        Vector3 gatherPosition = GetCurrentGatherPosition();
+        float distanceToGatherPosition = GetXZDistance(transform.position, gatherPosition);
+        float distanceToResource = GetXZDistance(transform.position, resourceTarget.transform.position);
+        float effectiveGatherRange = GetEffectiveGatherRange();
+
+        if (distanceToGatherPosition <= Mathf.Max(stopDistance * 4f, collisionRadius * 0.75f) ||
+            distanceToResource <= effectiveGatherRange)
+        {
+            isMoving = false;
+            rb.linearVelocity = Vector3.zero;
+
+            LookAtTarget(resourceTarget.transform.position);
+
+            if (gatherTimer <= 0f)
+            {
+                int gatheredAmount = resourceTarget.TakeResource(gatherAmount);
+
+                if (PlayerResources.Instance != null)
+                {
+                    PlayerResources.Instance.AddMinerals(gatheredAmount);
+                }
+
+                gatherTimer = gatherCooldown;
+            }
+        }
+        else
+        {
+            targetPosition = gatherPosition;
+            isMoving = true;
+        }
+    }
+
+    private Vector3 GetCurrentGatherPosition()
+    {
+        if (resourceTarget == null)
+        {
+            return transform.position;
+        }
+
+        Vector3 position = resourceTarget.transform.position + gatherOffsetFromResource;
+        position.y = transform.position.y;
+        return position;
+    }
+
+    private float GetEffectiveGatherRange()
+    {
+        if (resourceTarget == null)
+        {
+            return gatherRange;
+        }
+
+        return Mathf.Max(
+            gatherRange,
+            resourceTarget.collisionRadius + collisionRadius + 0.35f
+        );
+    }
+
     private void HandleAutoAttack()
     {
         if (attackTarget == null || attackTarget.IsDead())
@@ -328,7 +428,34 @@ public class Unit : MonoBehaviour
         targetPosition = position;
         isMoving = true;
         attackTarget = null;
+        resourceTarget = null;
         commandState = UnitCommandState.Move;
+    }
+
+    public void GatherResource(ResourceNode target, Vector3 offsetFromResource)
+    {
+        if (!canGather)
+        {
+            return;
+        }
+
+        if (target == null || target.IsEmpty())
+        {
+            return;
+        }
+
+        CancelMoveCommandLine();
+
+        resourceTarget = target;
+        gatherOffsetFromResource = offsetFromResource;
+
+        attackTarget = null;
+        commandState = UnitCommandState.GatherResource;
+
+        targetPosition = resourceTarget.transform.position + gatherOffsetFromResource;
+        targetPosition.y = transform.position.y;
+
+        isMoving = true;
     }
 
     public void AttackMoveTo(Vector3 position)
@@ -338,6 +465,7 @@ public class Unit : MonoBehaviour
         attackMoveDestination = position;
         targetPosition = position;
         attackTarget = null;
+        resourceTarget = null;
 
         isMoving = true;
         commandState = UnitCommandState.AttackMove;
@@ -354,6 +482,7 @@ public class Unit : MonoBehaviour
 
         attackTarget = target;
         attackOffsetFromTarget = offsetFromTarget;
+        resourceTarget = null;
 
         commandState = UnitCommandState.AttackTarget;
 

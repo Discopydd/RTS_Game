@@ -25,8 +25,17 @@ public class RTSController : MonoBehaviour
     public float attackTargetCircleHeight = -0.95f;
     public float attackTargetCircleWidth = 0.08f;
 
+    [Header("Resource Target Circle")]
+    public float resourceTargetCircleHeight = 0.08f;
+    public float resourceTargetCircleExtraRadius = 0.35f;
+    public float resourceTargetCircleWidth = 0.08f;
+
     private GameObject attackTargetCircle;
     private Unit currentAttackTarget;
+
+    private GameObject resourceTargetCircle;
+    private ResourceNode currentResourceTarget;
+
     private bool isAttackMoveMode = false;
 
     private List<Unit> selectedUnits = new List<Unit>();
@@ -39,6 +48,7 @@ public class RTSController : MonoBehaviour
     {
         CleanupSelectedUnits();
         CleanupAttackTargetCircle();
+        CleanupResourceTargetCircle();
 
         HandleAttackMoveHotkey();
 
@@ -180,14 +190,25 @@ public class RTSController : MonoBehaviour
                 !clickedUnit.IsDead() &&
                 clickedUnit.team != UnitTeam.Player)
             {
+                ClearResourceTargetCircle();
                 ShowAttackTargetCircle(clickedUnit);
                 AttackSelectedUnits(clickedUnit);
+                return;
             }
-            else
+
+            ResourceNode clickedResource = hit.collider.GetComponentInParent<ResourceNode>();
+
+            if (clickedResource != null && !clickedResource.IsEmpty())
             {
                 ClearAttackTargetCircle();
-                AttackMoveSelectedUnits(hit.point);
+                ShowResourceTargetCircle(clickedResource);
+                GatherSelectedUnits(clickedResource);
+                return;
             }
+
+            ClearAttackTargetCircle();
+            ClearResourceTargetCircle();
+            AttackMoveSelectedUnits(hit.point);
         }
 
         isAttackMoveMode = false;
@@ -217,11 +238,24 @@ public class RTSController : MonoBehaviour
                 !clickedUnit.IsDead() &&
                 clickedUnit.team != UnitTeam.Player)
             {
+                ClearResourceTargetCircle();
                 ShowAttackTargetCircle(clickedUnit);
                 AttackSelectedUnits(clickedUnit);
                 return;
             }
+
+            ResourceNode clickedResource = hit.collider.GetComponentInParent<ResourceNode>();
+
+            if (clickedResource != null && !clickedResource.IsEmpty())
+            {
+                ClearAttackTargetCircle();
+                ShowResourceTargetCircle(clickedResource);
+                GatherSelectedUnits(clickedResource);
+                return;
+            }
+
             ClearAttackTargetCircle();
+            ClearResourceTargetCircle();
             MoveSelectedUnits(hit.point);
         }
     }
@@ -629,6 +663,14 @@ public class RTSController : MonoBehaviour
         {
             GUI.Label(new Rect(20, 20, 300, 30), "Attack Move Mode: Left Click");
         }
+
+        if (currentResourceTarget != null && !currentResourceTarget.IsEmpty())
+        {
+            GUI.Label(
+                new Rect(20, 95, 300, 30),
+                "Selected Mineral: " + currentResourceTarget.CurrentAmount + " / " + currentResourceTarget.maxAmount
+            );
+        }
     }
 
     private Rect GetScreenRectForGUI(Vector3 start, Vector3 end)
@@ -643,4 +685,175 @@ public class RTSController : MonoBehaviour
 
         return Rect.MinMaxRect(xMin, yMin, xMax, yMax);
     }
+
+    private void GatherSelectedUnits(ResourceNode resourceNode)
+    {
+        CleanupSelectedUnits();
+
+        List<Unit> gatherUnits = new List<Unit>(selectedUnits);
+
+        gatherUnits.RemoveAll(unit => unit == null || unit.IsDead() || !unit.canGather);
+
+        if (gatherUnits.Count == 0 || resourceNode == null || resourceNode.IsEmpty())
+        {
+            return;
+        }
+
+        gatherUnits.Sort((a, b) =>
+        {
+            float distanceA = Vector3.Distance(a.transform.position, resourceNode.transform.position);
+            float distanceB = Vector3.Distance(b.transform.position, resourceNode.transform.position);
+
+            return distanceA.CompareTo(distanceB);
+        });
+
+        List<Vector3> availableOffsets = GenerateResourceGatherOffsets(resourceNode, gatherUnits);
+        List<Vector3> usedOffsets = new List<Vector3>();
+
+        foreach (Unit unit in gatherUnits)
+        {
+            Vector3 bestOffset = FindBestResourceGatherOffset(
+                unit,
+                resourceNode,
+                availableOffsets,
+                usedOffsets
+            );
+
+            usedOffsets.Add(bestOffset);
+            unit.GatherResource(resourceNode, bestOffset);
+        }
+    }
+
+    private List<Vector3> GenerateResourceGatherOffsets(ResourceNode resourceNode, List<Unit> gatherUnits)
+    {
+        List<Vector3> offsets = new List<Vector3>();
+
+        if (resourceNode == null || gatherUnits.Count == 0)
+        {
+            return offsets;
+        }
+
+        float unitRadius = gatherUnits[0].collisionRadius;
+        float baseRadius = resourceNode.collisionRadius + unitRadius + 0.25f;
+        float ringSpacing = unitRadius * 2f * 1.2f;
+        int maxGatherRing = Mathf.Max(2, Mathf.CeilToInt(gatherUnits.Count / 6f) + 2);
+
+        for (int ring = 0; ring < maxGatherRing; ring++)
+        {
+            float ringRadius = baseRadius + ring * ringSpacing;
+            int pointCount = Mathf.Max(
+                8,
+                Mathf.CeilToInt((2f * Mathf.PI * ringRadius) / Mathf.Max(0.1f, unitRadius * 2f))
+            );
+
+            for (int i = 0; i < pointCount; i++)
+            {
+                float angle = Mathf.PI * 2f * i / pointCount;
+
+                Vector3 offset = new Vector3(
+                    Mathf.Cos(angle) * ringRadius,
+                    0f,
+                    Mathf.Sin(angle) * ringRadius
+                );
+
+                offsets.Add(offset);
+            }
+        }
+
+        return offsets;
+    }
+
+    private Vector3 FindBestResourceGatherOffset(
+        Unit unit,
+        ResourceNode resourceNode,
+        List<Vector3> availableOffsets,
+        List<Vector3> usedOffsets
+    )
+    {
+        Vector3 bestOffset = Vector3.zero;
+        float bestDistance = Mathf.Infinity;
+
+        foreach (Vector3 offset in availableOffsets)
+        {
+            if (usedOffsets.Contains(offset))
+            {
+                continue;
+            }
+
+            Vector3 worldPosition = resourceNode.transform.position + offset;
+            float distance = Vector3.Distance(unit.transform.position, worldPosition);
+
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestOffset = offset;
+            }
+        }
+
+        return bestOffset;
+    }
+
+    private void ShowResourceTargetCircle(ResourceNode target)
+    {
+        ClearResourceTargetCircle();
+
+        if (target == null || target.IsEmpty())
+        {
+            return;
+        }
+
+        currentResourceTarget = target;
+
+        resourceTargetCircle = new GameObject("ResourceTargetCircle");
+        resourceTargetCircle.transform.SetParent(target.transform);
+        resourceTargetCircle.transform.position = new Vector3(
+            target.transform.position.x,
+            resourceTargetCircleHeight,
+            target.transform.position.z
+        );
+        resourceTargetCircle.transform.rotation = Quaternion.identity;
+
+        LineRenderer lineRenderer = resourceTargetCircle.AddComponent<LineRenderer>();
+
+        lineRenderer.useWorldSpace = false;
+        lineRenderer.loop = true;
+        lineRenderer.positionCount = 64;
+        lineRenderer.widthMultiplier = resourceTargetCircleWidth;
+
+        Material material = new Material(Shader.Find("Sprites/Default"));
+        material.color = Color.cyan;
+        lineRenderer.material = material;
+
+        float radius = target.collisionRadius + resourceTargetCircleExtraRadius;
+
+        for (int i = 0; i < 64; i++)
+        {
+            float angle = Mathf.PI * 2f * i / 64f;
+
+            float x = Mathf.Cos(angle) * radius;
+            float z = Mathf.Sin(angle) * radius;
+
+            lineRenderer.SetPosition(i, new Vector3(x, 0f, z));
+        }
+    }
+
+    private void ClearResourceTargetCircle()
+    {
+        if (resourceTargetCircle != null)
+        {
+            Destroy(resourceTargetCircle);
+        }
+
+        resourceTargetCircle = null;
+        currentResourceTarget = null;
+    }
+
+    private void CleanupResourceTargetCircle()
+    {
+        if (currentResourceTarget == null || currentResourceTarget.IsEmpty())
+        {
+            ClearResourceTargetCircle();
+        }
+    }
+
 }
