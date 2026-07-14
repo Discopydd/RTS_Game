@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 public class RTSController : MonoBehaviour
@@ -29,6 +29,10 @@ public class RTSController : MonoBehaviour
     public float resourceTargetCircleHeight = 0.08f;
     public float resourceTargetCircleExtraRadius = 0.35f;
     public float resourceTargetCircleWidth = 0.08f;
+
+    [Header("Click Assist")]
+    public float resourceClickAssistRadius = 1.2f;
+    public float depotClickAssistRadius = 0.8f;
 
     private GameObject attackTargetCircle;
     private Unit currentAttackTarget;
@@ -80,6 +84,13 @@ public class RTSController : MonoBehaviour
 
         if (Input.GetMouseButtonUp(0))
         {
+            // 攻击移动等模式会直接处理鼠标按下事件。
+            // 没有真正开始框选时，不处理这个 MouseUp，避免误清空选择。
+            if (!isDragging)
+            {
+                return;
+            }
+
             dragEndPosition = Input.mousePosition;
             isDragging = false;
 
@@ -99,26 +110,29 @@ public class RTSController : MonoBehaviour
     private void SelectSingleUnit()
     {
         Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
+        RaycastHit[] hits = GetSortedRaycastHits(ray);
 
         ClearSelection();
         ClearSelectedDepotCircle();
 
-        if (Physics.Raycast(ray, out RaycastHit hit))
+        // 建筑优先。即使移动中的单位挡在建筑前面，也能直接选中建筑。
+        ResourceDepot clickedDepot = FindDepotInHits(hits);
+
+        if (clickedDepot != null)
         {
-            ResourceDepot depot = hit.collider.GetComponentInParent<ResourceDepot>();
+            ShowSelectedDepotCircle(clickedDepot);
+            return;
+        }
 
-            if (depot != null)
-            {
-                ShowSelectedDepotCircle(depot);
-                return;
-            }
-
+        foreach (RaycastHit hit in hits)
+        {
             Unit unit = hit.collider.GetComponentInParent<Unit>();
 
             if (unit != null && !unit.IsDead() && unit.team == UnitTeam.Player)
             {
                 selectedUnits.Add(unit);
                 unit.SetSelected(true);
+                return;
             }
         }
     }
@@ -194,34 +208,47 @@ public class RTSController : MonoBehaviour
         }
 
         Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
+        RaycastHit[] hits = GetSortedRaycastHits(ray);
 
-        if (Physics.Raycast(ray, out RaycastHit hit))
+        // 即使当前处于攻击移动模式，左键点基地仍然优先选择基地。
+        ResourceDepot clickedDepot = FindDepotInHits(hits);
+
+        if (clickedDepot != null)
         {
-            Unit clickedUnit = hit.collider.GetComponentInParent<Unit>();
+            isAttackMoveMode = false;
+            ClearSelection();
+            ClearSelectedDepotCircle();
+            ShowSelectedDepotCircle(clickedDepot);
+            return;
+        }
 
-            if (clickedUnit != null &&
-                !clickedUnit.IsDead() &&
-                clickedUnit.team != UnitTeam.Player)
-            {
-                ClearResourceTargetCircle();
-                ShowAttackTargetCircle(clickedUnit);
-                AttackSelectedUnits(clickedUnit);
-                return;
-            }
+        Unit clickedUnit = FindEnemyUnitInHits(hits);
 
-            ResourceNode clickedResource = hit.collider.GetComponentInParent<ResourceNode>();
+        if (clickedUnit != null)
+        {
+            ClearResourceTargetCircle();
+            ShowAttackTargetCircle(clickedUnit);
+            AttackSelectedUnits(clickedUnit);
+            isAttackMoveMode = false;
+            return;
+        }
 
-            if (clickedResource != null && !clickedResource.IsEmpty())
-            {
-                ClearAttackTargetCircle();
-                ShowResourceTargetCircle(clickedResource);
-                GatherSelectedUnits(clickedResource);
-                return;
-            }
+        ResourceNode clickedResource = FindResourceNodeInHits(hits);
 
+        if (clickedResource != null)
+        {
+            ClearAttackTargetCircle();
+            ShowResourceTargetCircle(clickedResource);
+            GatherSelectedUnits(clickedResource);
+            isAttackMoveMode = false;
+            return;
+        }
+
+        if (TryGetCommandPoint(hits, out Vector3 commandPoint))
+        {
             ClearAttackTargetCircle();
             ClearResourceTargetCircle();
-            AttackMoveSelectedUnits(hit.point);
+            AttackMoveSelectedUnits(commandPoint);
         }
 
         isAttackMoveMode = false;
@@ -241,36 +268,211 @@ public class RTSController : MonoBehaviour
             return;
         }
 
+        // 右键只负责下达命令，不保留或创建基地的选中反馈。
+        ClearSelectedDepotCircle();
+
         Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
+        RaycastHit[] hits = GetSortedRaycastHits(ray);
 
-        if (Physics.Raycast(ray, out RaycastHit hit))
+        Unit clickedUnit = FindEnemyUnitInHits(hits);
+
+        if (clickedUnit != null)
         {
-            Unit clickedUnit = hit.collider.GetComponentInParent<Unit>();
+            ClearResourceTargetCircle();
+            ShowAttackTargetCircle(clickedUnit);
+            AttackSelectedUnits(clickedUnit);
+            return;
+        }
 
-            if (clickedUnit != null &&
-                !clickedUnit.IsDead() &&
-                clickedUnit.team != UnitTeam.Player)
-            {
-                ClearResourceTargetCircle();
-                ShowAttackTargetCircle(clickedUnit);
-                AttackSelectedUnits(clickedUnit);
-                return;
-            }
+        ResourceNode clickedResource = FindResourceNodeInHits(hits);
 
-            ResourceNode clickedResource = hit.collider.GetComponentInParent<ResourceNode>();
+        if (clickedResource != null)
+        {
+            ClearAttackTargetCircle();
+            ShowResourceTargetCircle(clickedResource);
+            GatherSelectedUnits(clickedResource);
+            return;
+        }
 
-            if (clickedResource != null && !clickedResource.IsEmpty())
-            {
-                ClearAttackTargetCircle();
-                ShowResourceTargetCircle(clickedResource);
-                GatherSelectedUnits(clickedResource);
-                return;
-            }
+        // 右键仍然只下达命令，不会选中基地；
+        // 但允许使用点击辅助范围，避免必须正好点中 Collider 才能让工兵交付。
+        ResourceDepot clickedDepot = FindDepotInHits(hits);
 
+        if (clickedDepot != null)
+        {
             ClearAttackTargetCircle();
             ClearResourceTargetCircle();
-            MoveSelectedUnits(hit.point);
+            MoveSelectedUnitsToDepot(clickedDepot);
+            return;
         }
+
+        if (TryGetCommandPoint(hits, out Vector3 commandPoint))
+        {
+            ClearAttackTargetCircle();
+            ClearResourceTargetCircle();
+            MoveSelectedUnits(commandPoint);
+        }
+    }
+
+    private float GetXZDistance(Vector3 a, Vector3 b)
+    {
+        Vector2 posA = new Vector2(a.x, a.z);
+        Vector2 posB = new Vector2(b.x, b.z);
+        return Vector2.Distance(posA, posB);
+    }
+
+    private RaycastHit[] GetSortedRaycastHits(Ray ray)
+    {
+        RaycastHit[] hits = Physics.RaycastAll(ray, Mathf.Infinity, ~0, QueryTriggerInteraction.Collide);
+        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+        return hits;
+    }
+
+    private Unit FindEnemyUnitInHits(RaycastHit[] hits)
+    {
+        foreach (RaycastHit hit in hits)
+        {
+            Unit unit = hit.collider.GetComponentInParent<Unit>();
+
+            if (unit != null && !unit.IsDead() && unit.team != UnitTeam.Player)
+            {
+                return unit;
+            }
+        }
+
+        return null;
+    }
+
+    private ResourceNode FindResourceNodeInHits(RaycastHit[] hits)
+    {
+        foreach (RaycastHit hit in hits)
+        {
+            ResourceNode resourceNode = hit.collider.GetComponentInParent<ResourceNode>();
+
+            if (resourceNode != null && !resourceNode.IsEmpty())
+            {
+                return resourceNode;
+            }
+        }
+
+        // 点击矿物模型边缘或矿物旁边的地面时，也允许识别为采集命令。
+        if (TryGetNonUnitHitPoint(hits, out Vector3 hitPoint))
+        {
+            ResourceNode[] resources = FindObjectsByType<ResourceNode>(FindObjectsSortMode.None);
+            ResourceNode nearest = null;
+            float nearestDistance = Mathf.Infinity;
+
+            foreach (ResourceNode resource in resources)
+            {
+                if (resource == null || resource.IsEmpty())
+                {
+                    continue;
+                }
+
+                float distance = GetXZDistance(hitPoint, resource.transform.position);
+                float allowedDistance = resource.collisionRadius + resourceClickAssistRadius;
+
+                if (distance <= allowedDistance && distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = resource;
+                }
+            }
+
+            return nearest;
+        }
+
+        return null;
+    }
+
+    private ResourceDepot FindDepotDirectlyInHits(RaycastHit[] hits)
+    {
+        foreach (RaycastHit hit in hits)
+        {
+            ResourceDepot depot = hit.collider.GetComponentInParent<ResourceDepot>();
+
+            if (depot != null && depot.team == UnitTeam.Player)
+            {
+                return depot;
+            }
+        }
+
+        return null;
+    }
+
+    private ResourceDepot FindDepotInHits(RaycastHit[] hits)
+    {
+        foreach (RaycastHit hit in hits)
+        {
+            ResourceDepot depot = hit.collider.GetComponentInParent<ResourceDepot>();
+
+            if (depot != null && depot.team == UnitTeam.Player)
+            {
+                return depot;
+            }
+        }
+
+        // 点击建筑模型边缘时，按建筑的逻辑半径进行一次容错识别。
+        if (TryGetNonUnitHitPoint(hits, out Vector3 hitPoint))
+        {
+            ResourceDepot[] depots = FindObjectsByType<ResourceDepot>(FindObjectsSortMode.None);
+            ResourceDepot nearest = null;
+            float nearestDistance = Mathf.Infinity;
+
+            foreach (ResourceDepot depot in depots)
+            {
+                if (depot == null || depot.team != UnitTeam.Player)
+                {
+                    continue;
+                }
+
+                float distance = GetXZDistance(hitPoint, depot.transform.position);
+                float allowedDistance = depot.collisionRadius + depotClickAssistRadius;
+
+                if (distance <= allowedDistance && distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = depot;
+                }
+            }
+
+            return nearest;
+        }
+
+        return null;
+    }
+
+    private bool TryGetNonUnitHitPoint(RaycastHit[] hits, out Vector3 hitPoint)
+    {
+        foreach (RaycastHit hit in hits)
+        {
+            if (hit.collider.GetComponentInParent<Unit>() == null)
+            {
+                hitPoint = hit.point;
+                return true;
+            }
+        }
+
+        hitPoint = Vector3.zero;
+        return false;
+    }
+
+    private bool TryGetCommandPoint(RaycastHit[] hits, out Vector3 commandPoint)
+    {
+        // 路过的单位不再挡住地面点击。优先使用单位后方的地面或建筑碰撞点。
+        if (TryGetNonUnitHitPoint(hits, out commandPoint))
+        {
+            return true;
+        }
+
+        if (hits.Length > 0)
+        {
+            commandPoint = hits[0].point;
+            return true;
+        }
+
+        commandPoint = Vector3.zero;
+        return false;
     }
 
     private void AttackSelectedUnits(Unit enemyTarget)
@@ -427,6 +629,45 @@ public class RTSController : MonoBehaviour
             CreateMoveLine(unit, clickPosition);
 
             unit.MoveTo(finalTargetPosition);
+        }
+    }
+
+    private void MoveSelectedUnitsToDepot(ResourceDepot depot)
+    {
+        CleanupSelectedUnits();
+
+        if (depot == null || selectedUnits.Count == 0)
+        {
+            return;
+        }
+
+        List<Unit> unitsToMove = new List<Unit>(selectedUnits);
+        unitsToMove.RemoveAll(unit => unit == null || unit.IsDead());
+
+        if (unitsToMove.Count == 0)
+        {
+            return;
+        }
+
+        List<Vector3> offsets = GenerateDepotOffsets(depot, unitsToMove);
+        List<Vector3> usedOffsets = new List<Vector3>();
+
+        foreach (Unit unit in unitsToMove)
+        {
+            Vector3 bestOffset = FindBestDepotOffset(
+                unit,
+                depot,
+                offsets,
+                usedOffsets
+            );
+
+            usedOffsets.Add(bestOffset);
+
+            Vector3 target = depot.transform.position + bestOffset;
+            target.y = unit.transform.position.y;
+
+            CreateMoveLine(unit, target);
+            unit.MoveToDepot(depot, bestOffset);
         }
     }
 
@@ -775,28 +1016,49 @@ public class RTSController : MonoBehaviour
             return offsets;
         }
 
-        float unitRadius = gatherUnits[0].collisionRadius;
-        float baseRadius = resourceNode.collisionRadius + unitRadius + 0.05f;
+        Unit referenceWorker = gatherUnits[0];
+        float unitRadius = referenceWorker.collisionRadius;
+
+        Vector3 sampleOffset = referenceWorker.GetGatherOffsetForDirection(
+            resourceNode,
+            Vector3.forward
+        );
+
+        float firstRingRadius = Mathf.Max(0.1f, sampleOffset.magnitude);
         float ringSpacing = unitRadius * 2f * 1.15f;
         int maxGatherRing = Mathf.Max(2, Mathf.CeilToInt(gatherUnits.Count / 6f) + 2);
 
         for (int ring = 0; ring < maxGatherRing; ring++)
         {
-            float ringRadius = baseRadius + ring * ringSpacing;
+            float approximateRadius = firstRingRadius + ring * ringSpacing;
             int pointCount = Mathf.Max(
                 8,
-                Mathf.CeilToInt((2f * Mathf.PI * ringRadius) / Mathf.Max(0.1f, unitRadius * 2f))
+                Mathf.CeilToInt(
+                    (2f * Mathf.PI * approximateRadius) /
+                    Mathf.Max(0.1f, unitRadius * 2f)
+                )
             );
 
             for (int i = 0; i < pointCount; i++)
             {
                 float angle = Mathf.PI * 2f * i / pointCount;
-
-                Vector3 offset = new Vector3(
-                    Mathf.Cos(angle) * ringRadius,
+                Vector3 direction = new Vector3(
+                    Mathf.Cos(angle),
                     0f,
-                    Mathf.Sin(angle) * ringRadius
+                    Mathf.Sin(angle)
                 );
+
+                // 第一圈根据资源实际 Collider 表面计算。
+                Vector3 offset = referenceWorker.GetGatherOffsetForDirection(
+                    resourceNode,
+                    direction
+                );
+
+                // 多出的工兵才向外增加环，不影响第一圈贴近距离。
+                if (ring > 0)
+                {
+                    offset += direction * (ring * ringSpacing);
+                }
 
                 offsets.Add(offset);
             }
@@ -969,28 +1231,28 @@ public class RTSController : MonoBehaviour
     {
         List<Vector3> offsets = new List<Vector3>();
 
-        if (depot == null)
+        if (depot == null || units == null || units.Count == 0)
         {
             return offsets;
         }
 
-        float unitRadius = 0.6f;
+        // 至少生成 8 个候选点，让单个单位也能选择离自己最近的基地一侧。
+        int pointCount = Mathf.Max(8, units.Count);
+        Unit referenceUnit = units[0];
 
-        if (units.Count > 0)
+        for (int i = 0; i < pointCount; i++)
         {
-            unitRadius = units[0].collisionRadius;
-        }
-
-        float baseRadius = depot.collisionRadius + unitRadius + 0.1f;
-
-        for (int i = 0; i < units.Count; i++)
-        {
-            float angle = Mathf.PI * 2f * i / units.Count;
-
-            Vector3 offset = new Vector3(
-                Mathf.Cos(angle) * baseRadius,
+            float angle = Mathf.PI * 2f * i / pointCount;
+            Vector3 direction = new Vector3(
+                Mathf.Cos(angle),
                 0f,
-                Mathf.Sin(angle) * baseRadius
+                Mathf.Sin(angle)
+            );
+
+            // 按基地真实 Collider 外缘计算，不再只依赖 collisionRadius。
+            Vector3 offset = referenceUnit.GetDepotOffsetForDirection(
+                depot,
+                direction
             );
 
             offsets.Add(offset);

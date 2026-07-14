@@ -9,7 +9,7 @@ public class ResourceNode : MonoBehaviour
 
     private int currentAmount;
 
-    private void Start()
+    private void Awake()
     {
         currentAmount = maxAmount;
     }
