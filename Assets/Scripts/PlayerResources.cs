@@ -25,6 +25,22 @@ public class PlayerResources : MonoBehaviour
         minerals += amount;
     }
 
+    public bool SpendMinerals(int amount)
+    {
+        if (amount <= 0)
+        {
+            return true;
+        }
+
+        if (minerals < amount)
+        {
+            return false;
+        }
+
+        minerals -= amount;
+        return true;
+    }
+
     private void OnGUI()
     {
         EnsureGUIStyle();

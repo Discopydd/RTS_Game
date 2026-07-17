@@ -118,6 +118,12 @@ public class Unit : MonoBehaviour
     private Vector3 depositDirectionFromDepot = Vector3.forward;
     private float depositAdditionalRingDistance;
 
+    // 多工兵共享矿点/基地时使用的独立站位编号。
+    // 采集和卸载完成后会立刻释放，避免空闲工兵长期占位。
+    private int gatherSlotIndex = -1;
+    private int depositSlotIndex = -1;
+    private float nextGatherSlotPromotionTime;
+
     private CapsuleCollider unitCollider;
     private Rigidbody rb;
     private NavMeshAgent agent;
@@ -325,6 +331,8 @@ public class Unit : MonoBehaviour
     {
         if (resourceTarget == null || resourceTarget.IsEmpty())
         {
+            ReleaseGatherSlot();
+
             if (carriedMinerals > 0)
             {
                 BeginReturnToDepot();
@@ -332,6 +340,7 @@ public class Unit : MonoBehaviour
             else if (!TrySwitchToNearbyResource())
             {
                 resourceTarget = null;
+                ReleaseDepositSlot();
                 StopMovement(UnitCommandState.Idle);
             }
 
@@ -344,22 +353,33 @@ public class Unit : MonoBehaviour
             return;
         }
 
+        if (gatherSlotIndex < 0)
+        {
+            AcquireGatherSlot(resourceTarget, gatherDirectionFromResource);
+        }
+
+        TryPromoteGatherSlot();
+
         Vector3 gatherPosition = GetCurrentGatherPosition();
-        float arrivalTolerance = Mathf.Max(gatherArrivalDistance, AgentRadius * 0.42f);
+        float arrivalTolerance = Mathf.Max(gatherArrivalDistance, AgentRadius * 0.55f);
 
         bool alreadyAtGatherSlot = hasResolvedDestination &&
             GetXZDistance(transform.position, resolvedDestination) <= arrivalTolerance;
 
-        if (!alreadyAtGatherSlot)
-        {
-            MoveAgentTo(gatherPosition, 0.02f, false);
+        bool closeEnoughToResource = IsWithinResourceInteractionRange(resourceTarget);
 
-            if (!HasArrived(arrivalTolerance))
+        if (!alreadyAtGatherSlot && !closeEnoughToResource)
+        {
+            MoveAgentTo(gatherPosition, Mathf.Max(0.04f, AgentRadius * 0.08f), false);
+
+            if (!HasArrived(arrivalTolerance) && !IsWithinResourceInteractionRange(resourceTarget))
             {
                 return;
             }
         }
 
+        // 允许工兵在自己的站位附近完成采集，不再要求所有工兵精确挤到同一个
+        // NavMesh 边缘点。这样即使局部避让让它停在旁边，也不会永久卡住。
         PauseAgentAtDestination();
         LookAtTarget(resourceTarget.transform.position);
 
@@ -383,6 +403,8 @@ public class Unit : MonoBehaviour
 
     private void BeginReturnToDepot()
     {
+        ReleaseGatherSlot();
+
         if (!EnsureDepotTarget())
         {
             Debug.LogWarning(gameObject.name + " has no available depot target.");
@@ -390,6 +412,7 @@ public class Unit : MonoBehaviour
             return;
         }
 
+        AcquireDepositSlot(depotTarget, depositDirectionFromDepot);
         commandState = UnitCommandState.ReturnResource;
         InvalidateDestination();
         ResumeAgent();
@@ -399,27 +422,36 @@ public class Unit : MonoBehaviour
     {
         if (carriedMinerals <= 0)
         {
+            ReleaseDepositSlot();
             ContinueGatheringOrIdle();
             return;
         }
 
         if (!EnsureDepotTarget())
         {
+            ReleaseDepositSlot();
             StopMovement(UnitCommandState.Idle);
             return;
         }
 
+        if (depositSlotIndex < 0)
+        {
+            AcquireDepositSlot(depotTarget, depositDirectionFromDepot);
+        }
+
         Vector3 depositPosition = GetCurrentDepositPosition();
-        float arrivalTolerance = Mathf.Max(0.22f, AgentRadius * 0.45f);
+        float arrivalTolerance = Mathf.Max(0.24f, AgentRadius * 0.55f);
 
         bool alreadyAtDepotSlot = hasResolvedDestination &&
             GetXZDistance(transform.position, resolvedDestination) <= arrivalTolerance;
 
-        if (!alreadyAtDepotSlot)
-        {
-            MoveAgentTo(depositPosition, 0.02f, false);
+        bool closeEnoughToDepot = IsWithinDepotInteractionRange(depotTarget);
 
-            if (!HasArrived(arrivalTolerance))
+        if (!alreadyAtDepotSlot && !closeEnoughToDepot)
+        {
+            MoveAgentTo(depositPosition, Mathf.Max(0.04f, AgentRadius * 0.08f), false);
+
+            if (!HasArrived(arrivalTolerance) && !IsWithinDepotInteractionRange(depotTarget))
             {
                 return;
             }
@@ -434,13 +466,18 @@ public class Unit : MonoBehaviour
         }
 
         carriedMinerals = 0;
+        ReleaseDepositSlot();
         ContinueGatheringOrIdle();
     }
 
     private void ContinueGatheringOrIdle()
     {
+        ReleaseDepositSlot();
+
         if (resourceTarget != null && !resourceTarget.IsEmpty())
         {
+            Vector3 preferredDirection = transform.position - resourceTarget.transform.position;
+            AcquireGatherSlot(resourceTarget, preferredDirection);
             commandState = UnitCommandState.GatherResource;
             InvalidateDestination();
             ResumeAgent();
@@ -452,6 +489,7 @@ public class Unit : MonoBehaviour
             return;
         }
 
+        ReleaseGatherSlot();
         resourceTarget = null;
         StopMovement(UnitCommandState.Idle);
     }
@@ -700,10 +738,12 @@ public class Unit : MonoBehaviour
 
         consecutiveStuckChecks = 0;
 
-        if (NavMesh.SamplePosition(transform.position, out NavMeshHit hit, pathSampleRadius, NavMesh.AllAreas))
-        {
-            agent.Warp(hit.position);
-        }
+        // Agent 已经在 NavMesh 上时不要 Warp。多工兵堵塞时 Warp 会把附近单位
+        // 吸到相同的最近点，反而造成堆叠。重置路径和避让优先级即可让局部避让重新计算。
+        agent.avoidancePriority = Mathf.Clamp(
+            avoidancePriority + Mathf.Abs(GetInstanceID() + consecutiveStuckChecks * 13) % 31 - 15,
+            0,
+            99);
 
         InvalidateDestination();
         ResumeAgent();
@@ -754,6 +794,7 @@ public class Unit : MonoBehaviour
 
     public void MoveTo(Vector3 position)
     {
+        ReleaseAllInteractionSlots();
         attackTarget = null;
         resourceTarget = null;
         depotTarget = null;
@@ -774,8 +815,11 @@ public class Unit : MonoBehaviour
         if (CanGatherResource() && carriedMinerals > 0)
         {
             CancelMoveCommandLine();
+            ReleaseGatherSlot();
+            ReleaseDepositSlot();
             depotTarget = target;
             AssignDepositOffset(target, offsetFromDepot);
+            AcquireDepositSlot(target, depositDirectionFromDepot);
             attackTarget = null;
             commandState = UnitCommandState.ReturnResource;
             InvalidateDestination();
@@ -798,6 +842,8 @@ public class Unit : MonoBehaviour
         }
 
         CancelMoveCommandLine();
+        ReleaseAllInteractionSlots();
+
         resourceTarget = target;
         depotTarget = depot;
 
@@ -816,8 +862,8 @@ public class Unit : MonoBehaviour
         }
 
         gatherDirectionFromResource = assignedOffset.normalized;
-        Vector3 baseOffset = GetGatherOffsetForDirection(resourceTarget, gatherDirectionFromResource);
-        gatherAdditionalRingDistance = Mathf.Max(0f, assignedOffset.magnitude - baseOffset.magnitude);
+        gatherAdditionalRingDistance = 0f;
+        AcquireGatherSlot(resourceTarget, gatherDirectionFromResource);
 
         AssignDepositOffset(depotTarget, offsetFromDepot);
 
@@ -830,6 +876,7 @@ public class Unit : MonoBehaviour
 
     public void AttackMoveTo(Vector3 position)
     {
+        ReleaseAllInteractionSlots();
         position.y = transform.position.y;
         attackMoveDestination = position;
         requestedDestination = position;
@@ -849,6 +896,7 @@ public class Unit : MonoBehaviour
         }
 
         CancelMoveCommandLine();
+        ReleaseAllInteractionSlots();
         attackTarget = target;
         attackOffsetFromTarget = offsetFromTarget;
         resourceTarget = null;
@@ -919,6 +967,7 @@ public class Unit : MonoBehaviour
     private void Die()
     {
         commandState = UnitCommandState.Idle;
+        ReleaseAllInteractionSlots();
         CancelMoveCommandLine();
 
         if (agent != null && agent.enabled && agent.isOnNavMesh)
@@ -1021,6 +1070,8 @@ public class Unit : MonoBehaviour
             return false;
         }
 
+        ReleaseGatherSlot();
+
         ResourceNode next = FindNearestAvailableResource(transform.position, resourceSearchRange);
         if (next == null)
         {
@@ -1038,6 +1089,7 @@ public class Unit : MonoBehaviour
 
         gatherDirectionFromResource.Normalize();
         gatherAdditionalRingDistance = 0f;
+        AcquireGatherSlot(next, gatherDirectionFromResource);
         commandState = UnitCommandState.GatherResource;
         gatherTimer = 0f;
         InvalidateDestination();
@@ -1071,6 +1123,11 @@ public class Unit : MonoBehaviour
             }
         }
 
+        if (depotTarget != nearest)
+        {
+            ReleaseDepositSlot();
+        }
+
         depotTarget = nearest;
 
         if (depotTarget != null)
@@ -1089,11 +1146,19 @@ public class Unit : MonoBehaviour
             return transform.position;
         }
 
-        Vector3 baseOffset = GetGatherOffsetForDirection(resourceTarget, gatherDirectionFromResource);
-        Vector3 offset = baseOffset + gatherDirectionFromResource.normalized * Mathf.Max(0f, gatherAdditionalRingDistance);
-        Vector3 position = resourceTarget.transform.position + offset;
-        position.y = transform.position.y;
-        return position;
+        if (gatherSlotIndex < 0)
+        {
+            AcquireGatherSlot(resourceTarget, gatherDirectionFromResource);
+        }
+
+        Vector3 offset = GetGatherSlotOffset(resourceTarget, Mathf.Max(0, gatherSlotIndex));
+        Vector3 desired = resourceTarget.transform.position + offset;
+        desired.y = transform.position.y;
+
+        return ResolveRadialInteractionPosition(
+            resourceTarget.transform.position,
+            desired,
+            AgentRadius * 0.35f);
     }
 
     private Vector3 GetCurrentDepositPosition()
@@ -1103,11 +1168,386 @@ public class Unit : MonoBehaviour
             return transform.position;
         }
 
-        Vector3 baseOffset = GetDepotOffsetForDirection(depotTarget, depositDirectionFromDepot);
-        Vector3 offset = baseOffset + depositDirectionFromDepot.normalized * Mathf.Max(0f, depositAdditionalRingDistance);
-        Vector3 position = depotTarget.transform.position + offset;
-        position.y = transform.position.y;
-        return position;
+        if (depositSlotIndex < 0)
+        {
+            AcquireDepositSlot(depotTarget, depositDirectionFromDepot);
+        }
+
+        Vector3 offset = GetDepositSlotOffset(depotTarget, Mathf.Max(0, depositSlotIndex));
+        Vector3 desired = depotTarget.transform.position + offset;
+        desired.y = transform.position.y;
+
+        return ResolveRadialInteractionPosition(
+            depotTarget.transform.position,
+            desired,
+            AgentRadius * 0.35f);
+    }
+
+    private void TryPromoteGatherSlot()
+    {
+        if (resourceTarget == null || gatherSlotIndex < 0 ||
+            Time.time < nextGatherSlotPromotionTime)
+        {
+            return;
+        }
+
+        nextGatherSlotPromotionTime = Time.time + 0.45f;
+        int firstRingCount = GetResourceFirstRingCount(resourceTarget);
+
+        if (gatherSlotIndex < firstRingCount)
+        {
+            return;
+        }
+
+        Vector3 preferredDirection = transform.position - resourceTarget.transform.position;
+        preferredDirection.y = 0f;
+
+        if (preferredDirection.sqrMagnitude < 0.0001f)
+        {
+            preferredDirection = gatherDirectionFromResource;
+        }
+
+        int preferredSlot = DirectionToFirstRingSlot(preferredDirection, firstRingCount);
+        int promotedSlot = resourceTarget.TryPromoteToFirstRing(
+            this,
+            preferredSlot,
+            firstRingCount);
+
+        if (promotedSlot < 0 || promotedSlot == gatherSlotIndex)
+        {
+            return;
+        }
+
+        gatherSlotIndex = promotedSlot;
+        Vector3 offset = GetGatherSlotOffset(resourceTarget, gatherSlotIndex);
+        gatherDirectionFromResource = offset.sqrMagnitude > 0.0001f
+            ? offset.normalized
+            : preferredDirection.normalized;
+        InvalidateDestination();
+        ResumeAgent();
+    }
+
+    private void AcquireGatherSlot(ResourceNode target, Vector3 preferredDirection)
+    {
+        if (target == null)
+        {
+            gatherSlotIndex = -1;
+            return;
+        }
+
+        if (resourceTarget != target)
+        {
+            ReleaseGatherSlot();
+            resourceTarget = target;
+        }
+
+        Vector3 flatDirection = preferredDirection;
+        flatDirection.y = 0f;
+
+        if (flatDirection.sqrMagnitude < 0.0001f)
+        {
+            flatDirection = transform.position - target.transform.position;
+            flatDirection.y = 0f;
+        }
+
+        if (flatDirection.sqrMagnitude < 0.0001f)
+        {
+            flatDirection = Vector3.forward;
+        }
+
+        flatDirection.Normalize();
+        int firstRingCount = GetResourceFirstRingCount(target);
+        int preferredSlot = DirectionToFirstRingSlot(flatDirection, firstRingCount);
+
+        gatherSlotIndex = target.ReserveGatherSlot(this, preferredSlot, firstRingCount);
+        nextGatherSlotPromotionTime = Time.time + 0.45f;
+        Vector3 offset = GetGatherSlotOffset(target, Mathf.Max(0, gatherSlotIndex));
+        gatherDirectionFromResource = offset.sqrMagnitude > 0.0001f
+            ? offset.normalized
+            : flatDirection;
+        gatherAdditionalRingDistance = 0f;
+    }
+
+    private void AcquireDepositSlot(ResourceDepot target, Vector3 preferredDirection)
+    {
+        if (target == null)
+        {
+            depositSlotIndex = -1;
+            return;
+        }
+
+        if (depotTarget != target)
+        {
+            ReleaseDepositSlot();
+            depotTarget = target;
+        }
+
+        Vector3 flatDirection = preferredDirection;
+        flatDirection.y = 0f;
+
+        if (flatDirection.sqrMagnitude < 0.0001f)
+        {
+            flatDirection = transform.position - target.transform.position;
+            flatDirection.y = 0f;
+        }
+
+        if (flatDirection.sqrMagnitude < 0.0001f)
+        {
+            flatDirection = Vector3.forward;
+        }
+
+        flatDirection.Normalize();
+        int firstRingCount = GetDepotFirstRingCount(target);
+        int preferredSlot = DirectionToFirstRingSlot(flatDirection, firstRingCount);
+
+        depositSlotIndex = target.ReserveDepositSlot(this, preferredSlot, firstRingCount);
+        Vector3 offset = GetDepositSlotOffset(target, Mathf.Max(0, depositSlotIndex));
+        depositDirectionFromDepot = offset.sqrMagnitude > 0.0001f
+            ? offset.normalized
+            : flatDirection;
+        depositAdditionalRingDistance = 0f;
+    }
+
+    private void ReleaseGatherSlot()
+    {
+        if (resourceTarget != null)
+        {
+            resourceTarget.ReleaseGatherSlot(this);
+        }
+
+        gatherSlotIndex = -1;
+        nextGatherSlotPromotionTime = 0f;
+    }
+
+    private void ReleaseDepositSlot()
+    {
+        if (depotTarget != null)
+        {
+            depotTarget.ReleaseDepositSlot(this);
+        }
+
+        depositSlotIndex = -1;
+    }
+
+    private void ReleaseAllInteractionSlots()
+    {
+        ReleaseGatherSlot();
+        ReleaseDepositSlot();
+    }
+
+    private Vector3 GetGatherSlotOffset(ResourceNode node, int slotIndex)
+    {
+        float firstRadius = Mathf.Max(
+            0.1f,
+            GetGatherOffsetForDirection(node, Vector3.forward).magnitude);
+        float spacing = GetInteractionSlotSpacing();
+
+        GetRingSlotData(slotIndex, firstRadius, spacing, out Vector3 direction, out int ring);
+        Vector3 baseOffset = GetGatherOffsetForDirection(node, direction);
+        return baseOffset + direction * (ring * spacing);
+    }
+
+    private Vector3 GetDepositSlotOffset(ResourceDepot depot, int slotIndex)
+    {
+        float firstRadius = Mathf.Max(
+            0.1f,
+            GetDepotOffsetForDirection(depot, Vector3.forward).magnitude);
+        float spacing = GetInteractionSlotSpacing();
+
+        GetRingSlotData(slotIndex, firstRadius, spacing, out Vector3 direction, out int ring);
+        Vector3 baseOffset = GetDepotOffsetForDirection(depot, direction);
+        return baseOffset + direction * (ring * spacing);
+    }
+
+    private int GetResourceFirstRingCount(ResourceNode node)
+    {
+        float firstRadius = Mathf.Max(
+            0.1f,
+            GetGatherOffsetForDirection(node, Vector3.forward).magnitude);
+        return CalculateRingPointCount(firstRadius, GetInteractionSlotSpacing());
+    }
+
+    private int GetDepotFirstRingCount(ResourceDepot depot)
+    {
+        float firstRadius = Mathf.Max(
+            0.1f,
+            GetDepotOffsetForDirection(depot, Vector3.forward).magnitude);
+        return CalculateRingPointCount(firstRadius, GetInteractionSlotSpacing());
+    }
+
+    private float GetInteractionSlotSpacing()
+    {
+        // 按模型碰撞半径而不是仅按缩小后的 Agent 半径排位，避免视觉上重叠。
+        return Mathf.Max(
+            AgentRadius * 2f + 0.18f,
+            Mathf.Max(0.1f, collisionRadius) * 2f + 0.12f);
+    }
+
+    private int CalculateRingPointCount(float radius, float spacing)
+    {
+        return Mathf.Max(
+            6,
+            Mathf.FloorToInt((2f * Mathf.PI * Mathf.Max(0.1f, radius)) /
+                             Mathf.Max(0.1f, spacing)));
+    }
+
+    private int DirectionToFirstRingSlot(Vector3 direction, int pointCount)
+    {
+        direction.y = 0f;
+
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            direction = Vector3.forward;
+        }
+
+        direction.Normalize();
+        float angle = Mathf.Atan2(direction.z, direction.x);
+
+        if (angle < 0f)
+        {
+            angle += Mathf.PI * 2f;
+        }
+
+        int count = Mathf.Max(1, pointCount);
+        return Mathf.RoundToInt(angle / (Mathf.PI * 2f) * count) % count;
+    }
+
+    private void GetRingSlotData(
+        int slotIndex,
+        float firstRadius,
+        float spacing,
+        out Vector3 direction,
+        out int ring)
+    {
+        int remaining = Mathf.Max(0, slotIndex);
+        ring = 0;
+
+        while (ring < 32)
+        {
+            float radius = firstRadius + ring * spacing;
+            int pointCount = CalculateRingPointCount(radius, spacing);
+
+            if (remaining < pointCount)
+            {
+                // 奇数圈错开半格，减少内外圈单位排成同一直线造成堵塞。
+                float stagger = (ring & 1) == 1 ? 0.5f : 0f;
+                float angle = Mathf.PI * 2f * (remaining + stagger) / pointCount;
+                direction = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+                return;
+            }
+
+            remaining -= pointCount;
+            ring++;
+        }
+
+        float fallbackAngle = Mathf.PI * 2f * (slotIndex % 16) / 16f;
+        direction = new Vector3(Mathf.Cos(fallbackAngle), 0f, Mathf.Sin(fallbackAngle));
+    }
+
+    private Vector3 ResolveRadialInteractionPosition(
+        Vector3 interactionCenter,
+        Vector3 desiredPosition,
+        float sampleRadius)
+    {
+        Vector3 direction = desiredPosition - interactionCenter;
+        direction.y = 0f;
+
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            direction = Vector3.forward;
+        }
+
+        direction.Normalize();
+        float preferredDistance = GetXZDistance(interactionCenter, desiredPosition);
+        float step = Mathf.Max(0.12f, AgentRadius * 0.35f);
+        float probeRadius = Mathf.Max(0.12f, sampleRadius);
+        float navMeshY = agent != null && agent.enabled && agent.isOnNavMesh
+            ? agent.nextPosition.y
+            : desiredPosition.y;
+
+        // 只沿当前工兵自己的放射方向向外搜索，绝不绕到其他工兵的站位。
+        for (int i = 0; i <= 18; i++)
+        {
+            Vector3 candidate = interactionCenter + direction * (preferredDistance + i * step);
+            candidate.y = navMeshY;
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, probeRadius, NavMesh.AllAreas))
+            {
+                continue;
+            }
+
+            Vector3 fromCenter = hit.position - interactionCenter;
+            fromCenter.y = 0f;
+
+            if (fromCenter.sqrMagnitude < 0.0001f)
+            {
+                continue;
+            }
+
+            float directionAgreement = Vector3.Dot(fromCenter.normalized, direction);
+            if (directionAgreement < 0.94f)
+            {
+                continue;
+            }
+
+            Vector3 result = hit.position;
+            result.y = transform.position.y;
+            return result;
+        }
+
+        desiredPosition.y = transform.position.y;
+        return desiredPosition;
+    }
+
+    private bool IsWithinResourceInteractionRange(ResourceNode node)
+    {
+        if (node == null)
+        {
+            return false;
+        }
+
+        float allowedSurfaceDistance = AgentRadius + Mathf.Max(0.16f, gatherArrivalDistance);
+        return GetDistanceToColliderSurface(node.GetComponentsInChildren<Collider>(true))
+            <= allowedSurfaceDistance;
+    }
+
+    private bool IsWithinDepotInteractionRange(ResourceDepot depot)
+    {
+        if (depot == null)
+        {
+            return false;
+        }
+
+        float allowedSurfaceDistance = AgentRadius + Mathf.Max(0.18f, depotSurfaceGap + 0.12f);
+        return GetDistanceToColliderSurface(depot.GetComponentsInChildren<Collider>(true))
+            <= allowedSurfaceDistance;
+    }
+
+    private float GetDistanceToColliderSurface(Collider[] colliders)
+    {
+        if (colliders == null || colliders.Length == 0)
+        {
+            return Mathf.Infinity;
+        }
+
+        float nearest = Mathf.Infinity;
+        Vector3 currentPosition = transform.position;
+
+        foreach (Collider current in colliders)
+        {
+            if (current == null || !current.enabled)
+            {
+                continue;
+            }
+
+            Vector3 probe = currentPosition;
+            probe.y = current.bounds.center.y;
+            Vector3 closest = current.ClosestPoint(probe);
+            closest.y = currentPosition.y;
+            nearest = Mathf.Min(nearest, GetXZDistance(currentPosition, closest));
+        }
+
+        return nearest;
     }
 
     public Vector3 GetDepotOffsetForDirection(ResourceDepot depot, Vector3 directionFromDepot)
@@ -1140,8 +1580,7 @@ public class Unit : MonoBehaviour
         }
 
         depositDirectionFromDepot = flatOffset.normalized;
-        Vector3 baseOffset = GetDepotOffsetForDirection(depot, depositDirectionFromDepot);
-        depositAdditionalRingDistance = Mathf.Max(0f, flatOffset.magnitude - baseOffset.magnitude);
+        depositAdditionalRingDistance = 0f;
     }
 
     public float GetGatherStandingDistance(ResourceNode node)
@@ -1234,6 +1673,11 @@ public class Unit : MonoBehaviour
         }
 
         return found;
+    }
+
+    private void OnDestroy()
+    {
+        ReleaseAllInteractionSlots();
     }
 
     private void SetupAgent()

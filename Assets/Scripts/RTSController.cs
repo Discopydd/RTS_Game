@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 
 public class RTSController : MonoBehaviour
@@ -1215,6 +1215,11 @@ public class RTSController : MonoBehaviour
                 continue;
             }
 
+            if (!depot.acceptsResources)
+            {
+                continue;
+            }
+
             float distance = Vector3.Distance(fromPosition, depot.transform.position);
 
             if (distance < nearestDistance)
@@ -1271,6 +1276,7 @@ public class RTSController : MonoBehaviour
         }
 
         currentSelectedDepot = depot;
+        currentSelectedDepot.SetSelected(true);
 
         depotTargetCircle = new GameObject("DepotSelectionCircle");
         depotTargetCircle.transform.position = new Vector3(
@@ -1311,6 +1317,11 @@ public class RTSController : MonoBehaviour
 
     private void ClearSelectedDepotCircle()
     {
+        if (currentSelectedDepot != null)
+        {
+            currentSelectedDepot.SetSelected(false);
+        }
+
         if (depotTargetCircle != null)
         {
             Destroy(depotTargetCircle);
