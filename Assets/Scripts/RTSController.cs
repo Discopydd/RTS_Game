@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.AI;
 
 public class RTSController : MonoBehaviour
 {
@@ -22,8 +23,10 @@ public class RTSController : MonoBehaviour
 
     [Header("Attack Target Circle")]
     public float attackTargetCircleRadius = 0.9f;
+    [Tooltip("旧模型使用的备用高度。正常情况下会自动检测地面。")]
     public float attackTargetCircleHeight = -0.95f;
     public float attackTargetCircleWidth = 0.08f;
+    public float attackTargetCircleGroundOffset = 0.05f;
 
     [Header("Resource Target Circle")]
     public float resourceTargetCircleHeight = 0.08f;
@@ -54,6 +57,13 @@ public class RTSController : MonoBehaviour
     private void Update()
     {
         CleanupSelectedUnits();
+
+        if (BuildingPlacementManager.Instance != null &&
+            BuildingPlacementManager.Instance.HandleInputFromRTSController(this))
+        {
+            return;
+        }
+
         CleanupAttackTargetCircle();
         CleanupResourceTargetCircle();
 
@@ -72,6 +82,58 @@ public class RTSController : MonoBehaviour
     private void CleanupSelectedUnits()
     {
         selectedUnits.RemoveAll(unit => unit == null || unit.IsDead());
+    }
+
+    public Camera GetMainCamera()
+    {
+        return mainCamera;
+    }
+
+    public Unit GetFirstSelectedWorker()
+    {
+        CleanupSelectedUnits();
+
+        foreach (Unit unit in selectedUnits)
+        {
+            if (unit != null && !unit.IsDead() && unit.CanGatherResource())
+            {
+                return unit;
+            }
+        }
+
+        return null;
+    }
+
+    public bool HasSelectedWorker()
+    {
+        return GetFirstSelectedWorker() != null;
+    }
+
+    public bool HasPlayerCommandCenter()
+    {
+        ResourceDepot[] depots = FindObjectsByType<ResourceDepot>(FindObjectsSortMode.None);
+
+        foreach (ResourceDepot depot in depots)
+        {
+            if (depot == null)
+            {
+                continue;
+            }
+
+            BuildingConstruction construction = depot.GetComponent<BuildingConstruction>();
+
+            if (construction != null && !construction.IsComplete)
+            {
+                continue;
+            }
+
+            if (depot.team == UnitTeam.Player && depot.acceptsResources)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void HandleSelection()
@@ -244,7 +306,7 @@ public class RTSController : MonoBehaviour
             return;
         }
 
-        if (TryGetCommandPoint(hits, out Vector3 commandPoint))
+        if (TryGetCommandPoint(ray, hits, out Vector3 commandPoint))
         {
             ClearAttackTargetCircle();
             ClearResourceTargetCircle();
@@ -306,7 +368,7 @@ public class RTSController : MonoBehaviour
             return;
         }
 
-        if (TryGetCommandPoint(hits, out Vector3 commandPoint))
+        if (TryGetCommandPoint(ray, hits, out Vector3 commandPoint))
         {
             ClearAttackTargetCircle();
             ClearResourceTargetCircle();
@@ -457,17 +519,48 @@ public class RTSController : MonoBehaviour
         return false;
     }
 
-    private bool TryGetCommandPoint(RaycastHit[] hits, out Vector3 commandPoint)
+    private bool TryGetCommandPoint(Ray ray, RaycastHit[] hits, out Vector3 commandPoint)
     {
-        // 路过的单位不再挡住地面点击。优先使用单位后方的地面或建筑碰撞点。
-        if (TryGetNonUnitHitPoint(hits, out commandPoint))
+        // RTS 地图是平面。直接把鼠标射线投影到当前 NavMesh 高度，
+        // 不让新导入模型、单位 Collider 或建筑屋顶改变移动目标点。
+        float groundY = 0f;
+
+        CleanupSelectedUnits();
+        if (selectedUnits.Count > 0 && selectedUnits[0] != null)
         {
+            Vector3 sampleOrigin = selectedUnits[0].transform.position;
+            if (NavMesh.SamplePosition(sampleOrigin, out NavMeshHit navHit, 3f, NavMesh.AllAreas))
+            {
+                groundY = navHit.position.y;
+            }
+            else
+            {
+                groundY = sampleOrigin.y;
+            }
+        }
+        else if (TryGetNonUnitHitPoint(hits, out Vector3 fallbackPoint))
+        {
+            groundY = fallbackPoint.y;
+        }
+
+        Plane movementPlane = new Plane(Vector3.up, new Vector3(0f, groundY, 0f));
+        if (movementPlane.Raycast(ray, out float enter))
+        {
+            Vector3 projectedPoint = ray.GetPoint(enter);
+
+            // 点击到 NavMesh 边缘或障碍物附近时，自动吸附到最近可行走点。
+            if (NavMesh.SamplePosition(projectedPoint, out NavMeshHit navHit, 2.5f, NavMesh.AllAreas))
+            {
+                commandPoint = navHit.position;
+                return true;
+            }
+
+            commandPoint = projectedPoint;
             return true;
         }
 
-        if (hits.Length > 0)
+        if (TryGetNonUnitHitPoint(hits, out commandPoint))
         {
-            commandPoint = hits[0].point;
             return true;
         }
 
@@ -838,9 +931,7 @@ public class RTSController : MonoBehaviour
         currentAttackTarget = target;
 
         attackTargetCircle = new GameObject("AttackTargetCircle");
-        attackTargetCircle.transform.SetParent(target.transform);
-        attackTargetCircle.transform.localPosition = new Vector3(0f, attackTargetCircleHeight, 0f);
-        attackTargetCircle.transform.localRotation = Quaternion.identity;
+        attackTargetCircle.transform.rotation = Quaternion.identity;
 
         LineRenderer lineRenderer = attackTargetCircle.AddComponent<LineRenderer>();
 
@@ -862,6 +953,8 @@ public class RTSController : MonoBehaviour
 
             lineRenderer.SetPosition(i, new Vector3(x, 0f, z));
         }
+
+        UpdateAttackTargetCirclePosition();
     }
 
     private void ClearAttackTargetCircle()
@@ -880,7 +973,56 @@ public class RTSController : MonoBehaviour
         if (currentAttackTarget == null || currentAttackTarget.IsDead())
         {
             ClearAttackTargetCircle();
+            return;
         }
+
+        UpdateAttackTargetCirclePosition();
+    }
+
+    private void UpdateAttackTargetCirclePosition()
+    {
+        if (attackTargetCircle == null || currentAttackTarget == null)
+        {
+            return;
+        }
+
+        float groundY = FindGroundYBelowTarget(currentAttackTarget);
+        attackTargetCircle.transform.position = new Vector3(
+            currentAttackTarget.transform.position.x,
+            groundY + Mathf.Max(0.01f, attackTargetCircleGroundOffset),
+            currentAttackTarget.transform.position.z);
+        attackTargetCircle.transform.rotation = Quaternion.identity;
+    }
+
+    private float FindGroundYBelowTarget(Unit target)
+    {
+        if (NavMesh.SamplePosition(target.transform.position, out NavMeshHit navHit, 3f, NavMesh.AllAreas))
+        {
+            return navHit.position.y;
+        }
+
+        Vector3 rayOrigin = target.transform.position + Vector3.up * 5f;
+        RaycastHit[] hits = Physics.RaycastAll(
+            rayOrigin,
+            Vector3.down,
+            20f,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+
+        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
+        foreach (RaycastHit hit in hits)
+        {
+            Unit hitUnit = hit.collider.GetComponentInParent<Unit>();
+            if (hitUnit == target)
+            {
+                continue;
+            }
+
+            return hit.point.y;
+        }
+
+        return target.transform.position.y + attackTargetCircleHeight;
     }
     private void ClearSelection()
     {
@@ -1220,6 +1362,13 @@ public class RTSController : MonoBehaviour
                 continue;
             }
 
+            BuildingConstruction construction = depot.GetComponent<BuildingConstruction>();
+
+            if (construction != null && !construction.IsComplete)
+            {
+                continue;
+            }
+
             float distance = Vector3.Distance(fromPosition, depot.transform.position);
 
             if (distance < nearestDistance)
@@ -1296,7 +1445,7 @@ public class RTSController : MonoBehaviour
         material.color = Color.cyan;
         lineRenderer.material = material;
 
-        float radius = depot.collisionRadius + 0.45f;
+        float radius = depot.GetWorldCollisionRadius() + 0.45f;
 
         for (int i = 0; i < 64; i++)
         {

@@ -16,6 +16,95 @@ public class ResourceDepot : MonoBehaviour
     public bool IsSelected { get; private set; }
 
     private readonly List<Unit> depositSlotOwners = new List<Unit>();
+    private Vector3 lastLossyScale;
+
+    private void Awake()
+    {
+        RefreshCollisionRadius();
+    }
+
+    private void OnEnable()
+    {
+        RefreshCollisionRadius();
+    }
+
+    private void LateUpdate()
+    {
+        Vector3 currentScale = transform.lossyScale;
+
+        if ((currentScale - lastLossyScale).sqrMagnitude > 0.000001f)
+        {
+            RefreshCollisionRadius();
+        }
+    }
+
+    private void OnValidate()
+    {
+        RefreshCollisionRadius();
+    }
+
+    /// <summary>
+    /// 根据当前所有 Collider 的世界尺寸更新建筑半径。
+    /// Prefab Scale 改变后，不需要再手动调整 collisionRadius。
+    /// </summary>
+    public void RefreshCollisionRadius()
+    {
+        lastLossyScale = transform.lossyScale;
+
+        if (TryCalculateWorldRadius(false, out float solidRadius) ||
+            TryCalculateWorldRadius(true, out solidRadius))
+        {
+            collisionRadius = Mathf.Max(0.1f, solidRadius);
+        }
+    }
+
+    public float GetWorldCollisionRadius()
+    {
+        RefreshCollisionRadius();
+        return Mathf.Max(0.1f, collisionRadius);
+    }
+
+    public bool CanAcceptResources(UnitTeam workerTeam)
+    {
+        if (!acceptsResources || team != workerTeam)
+        {
+            return false;
+        }
+
+        BuildingConstruction construction = GetComponent<BuildingConstruction>();
+        return construction == null || !construction.IsUnderConstruction;
+    }
+
+    private bool TryCalculateWorldRadius(bool useTriggerColliders, out float worldRadius)
+    {
+        worldRadius = 0f;
+        Collider[] colliders = GetComponentsInChildren<Collider>(true);
+        Vector3 center = transform.position;
+        bool found = false;
+
+        foreach (Collider current in colliders)
+        {
+            if (current == null || !current.enabled || current.isTrigger != useTriggerColliders)
+            {
+                continue;
+            }
+
+            Bounds bounds = current.bounds;
+            float xRadius = Mathf.Max(
+                Mathf.Abs(bounds.min.x - center.x),
+                Mathf.Abs(bounds.max.x - center.x)
+            );
+            float zRadius = Mathf.Max(
+                Mathf.Abs(bounds.min.z - center.z),
+                Mathf.Abs(bounds.max.z - center.z)
+            );
+
+            worldRadius = Mathf.Max(worldRadius, xRadius, zRadius);
+            found = true;
+        }
+
+        return found;
+    }
 
     public void SetSelected(bool selected)
     {
@@ -181,7 +270,7 @@ public class ResourceDepot : MonoBehaviour
 
         float fallbackDistance = Mathf.Max(
             0.05f,
-            collisionRadius + Mathf.Max(0f, unitRadius) + surfaceGap
+            GetWorldCollisionRadius() + Mathf.Max(0f, unitRadius) + surfaceGap
         );
 
         return direction * fallbackDistance;
@@ -262,6 +351,6 @@ public class ResourceDepot : MonoBehaviour
     private void OnDrawGizmosSelected()
     {
         Gizmos.color = Color.cyan;
-        Gizmos.DrawWireSphere(transform.position, collisionRadius);
+        Gizmos.DrawWireSphere(transform.position, GetWorldCollisionRadius());
     }
 }

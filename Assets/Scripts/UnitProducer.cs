@@ -19,7 +19,7 @@ public class UnitProducer : MonoBehaviour
     public float spawnSearchRadius = 3.0f;
 
     [Header("Spawn Avoid Settings")]
-    public float spawnedUnitY = 1.0f;
+    public float spawnedUnitY = 0.0f;
     public float spawnUnitRadius = 0.65f;
     public float spawnRingSpacing = 1.4f;
     public int maxSpawnRings = 5;

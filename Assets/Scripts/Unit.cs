@@ -99,7 +99,9 @@ public class Unit : MonoBehaviour
 
     [Header("Selection Circle")]
     public float selectionCircleRadius = 0.7f;
+    [Tooltip("旧模型使用的备用高度。正常情况下会自动检测地面。")]
     public float selectionCircleHeight = -0.95f;
+    public float selectionCircleGroundOffset = 0.05f;
 
     private int currentHp;
     private int carriedMinerals;
@@ -144,6 +146,15 @@ public class Unit : MonoBehaviour
 
     private void Awake()
     {
+        // 同一个 GameObject 上存在多个 Unit 时，它们会同时控制同一个 NavMeshAgent。
+        // 只保留组件列表中的第一个，避免一个 Unit 下达移动、另一个 Unit 立刻停止移动。
+        Unit[] unitComponents = GetComponents<Unit>();
+        if (unitComponents.Length > 1 && unitComponents[0] != this)
+        {
+            enabled = false;
+            return;
+        }
+
         currentHp = maxHp;
         movementPlaneY = transform.position.y;
         rb = GetComponent<Rigidbody>();
@@ -236,14 +247,14 @@ public class Unit : MonoBehaviour
 
     private void LateUpdate()
     {
-        if (agent == null || !agent.enabled || !agent.isOnNavMesh)
+        if (agent != null && agent.enabled && agent.isOnNavMesh)
         {
-            return;
+            Vector3 synchronizedPosition = agent.nextPosition;
+            synchronizedPosition.y = movementPlaneY;
+            transform.position = synchronizedPosition;
         }
 
-        Vector3 synchronizedPosition = agent.nextPosition;
-        synchronizedPosition.y = movementPlaneY;
-        transform.position = synchronizedPosition;
+        UpdateSelectionCirclePosition();
     }
 
     private void UpdateMoveCommand()
@@ -1099,7 +1110,7 @@ public class Unit : MonoBehaviour
 
     private bool EnsureDepotTarget()
     {
-        if (depotTarget != null && depotTarget.team == team)
+        if (IsDepotAvailable(depotTarget))
         {
             return true;
         }
@@ -1110,7 +1121,7 @@ public class Unit : MonoBehaviour
 
         foreach (ResourceDepot depot in depots)
         {
-            if (depot == null || depot.team != team)
+            if (!IsDepotAvailable(depot))
             {
                 continue;
             }
@@ -1137,6 +1148,11 @@ public class Unit : MonoBehaviour
         }
 
         return depotTarget != null;
+    }
+
+    private bool IsDepotAvailable(ResourceDepot depot)
+    {
+        return depot != null && depot.CanAcceptResources(team);
     }
 
     private Vector3 GetCurrentGatherPosition()
@@ -1678,6 +1694,11 @@ public class Unit : MonoBehaviour
     private void OnDestroy()
     {
         ReleaseAllInteractionSlots();
+
+        if (selectionCircle != null)
+        {
+            Destroy(selectionCircle);
+        }
     }
 
     private void SetupAgent()
@@ -1774,9 +1795,7 @@ public class Unit : MonoBehaviour
     private void CreateSelectionCircle()
     {
         selectionCircle = new GameObject("SelectionCircle");
-        selectionCircle.transform.SetParent(transform);
-        selectionCircle.transform.localPosition = new Vector3(0f, selectionCircleHeight, 0f);
-        selectionCircle.transform.localRotation = Quaternion.identity;
+        selectionCircle.transform.rotation = Quaternion.identity;
 
         LineRenderer lineRenderer = selectionCircle.AddComponent<LineRenderer>();
         lineRenderer.useWorldSpace = false;
@@ -1796,6 +1815,55 @@ public class Unit : MonoBehaviour
                 0f,
                 Mathf.Sin(angle) * selectionCircleRadius));
         }
+
+        UpdateSelectionCirclePosition();
+    }
+
+    private void UpdateSelectionCirclePosition()
+    {
+        if (selectionCircle == null || !selectionCircle.activeSelf)
+        {
+            return;
+        }
+
+        float groundY = FindGroundYBelowUnit();
+        selectionCircle.transform.position = new Vector3(
+            transform.position.x,
+            groundY + Mathf.Max(0.01f, selectionCircleGroundOffset),
+            transform.position.z);
+        selectionCircle.transform.rotation = Quaternion.identity;
+    }
+
+    private float FindGroundYBelowUnit()
+    {
+        if (NavMesh.SamplePosition(transform.position, out NavMeshHit navHit, 3f, NavMesh.AllAreas))
+        {
+            return navHit.position.y;
+        }
+
+        Vector3 rayOrigin = transform.position + Vector3.up * 5f;
+        RaycastHit[] hits = Physics.RaycastAll(
+            rayOrigin,
+            Vector3.down,
+            20f,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+
+        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
+        foreach (RaycastHit hit in hits)
+        {
+            Unit hitUnit = hit.collider.GetComponentInParent<Unit>();
+            if (hitUnit == this)
+            {
+                continue;
+            }
+
+            return hit.point.y;
+        }
+
+        // 没有检测到地面时才使用旧字段作为兼容回退。
+        return transform.position.y + selectionCircleHeight;
     }
 
     private void LookAtTarget(Vector3 target)

@@ -13,6 +13,7 @@ public class UnitHealthBar : MonoBehaviour
     private Unit unit;
     private Camera mainCamera;
 
+    private GameObject healthBarRoot;
     private GameObject backgroundBar;
     private GameObject fillBar;
 
@@ -24,12 +25,13 @@ public class UnitHealthBar : MonoBehaviour
         unit = GetComponent<Unit>();
         mainCamera = Camera.main;
 
+        ClearOldChildHealthBars();
         CreateHealthBar();
     }
 
     private void LateUpdate()
     {
-        if (unit == null || backgroundBar == null || fillBar == null)
+        if (unit == null || healthBarRoot == null || backgroundBar == null || fillBar == null)
         {
             return;
         }
@@ -38,44 +40,104 @@ public class UnitHealthBar : MonoBehaviour
         UpdateHealthBarValue();
     }
 
+    private void OnDestroy()
+    {
+        if (healthBarRoot != null)
+        {
+            Destroy(healthBarRoot);
+        }
+    }
+
+    private void ClearOldChildHealthBars()
+    {
+        Transform oldBackground = transform.Find("HealthBar_Background");
+        if (oldBackground != null)
+        {
+            Destroy(oldBackground.gameObject);
+        }
+
+        Transform oldFill = transform.Find("HealthBar_Fill");
+        if (oldFill != null)
+        {
+            Destroy(oldFill.gameObject);
+        }
+
+        Transform oldRoot = transform.Find("HealthBar_Root");
+        if (oldRoot != null)
+        {
+            Destroy(oldRoot.gameObject);
+        }
+    }
+
     private void CreateHealthBar()
     {
-        backgroundMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
-        backgroundMaterial.color = Color.black;
+        healthBarRoot = new GameObject(gameObject.name + "_HealthBar_Root");
 
-        fillMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+        backgroundMaterial = CreateBarMaterial("HealthBar_Background_Material", Color.black);
 
-        if (unit.team == UnitTeam.Player)
-        {
-            fillMaterial.color = Color.green;
-        }
-        else
-        {
-            fillMaterial.color = Color.red;
-        }
+        fillMaterial = CreateBarMaterial(
+            "HealthBar_Fill_Material",
+            unit != null && unit.team == UnitTeam.Enemy ? Color.red : Color.green
+        );
 
         backgroundBar = GameObject.CreatePrimitive(PrimitiveType.Cube);
         backgroundBar.name = "HealthBar_Background";
-        backgroundBar.transform.SetParent(transform);
+        backgroundBar.transform.SetParent(healthBarRoot.transform);
 
         Destroy(backgroundBar.GetComponent<Collider>());
 
-        backgroundBar.GetComponent<MeshRenderer>().material = backgroundMaterial;
-        SetupBarRenderer(backgroundBar);
+        MeshRenderer backgroundRenderer = backgroundBar.GetComponent<MeshRenderer>();
+        backgroundRenderer.material = backgroundMaterial;
+        SetupBarRenderer(backgroundRenderer);
 
         fillBar = GameObject.CreatePrimitive(PrimitiveType.Cube);
         fillBar.name = "HealthBar_Fill";
-        fillBar.transform.SetParent(transform);
+        fillBar.transform.SetParent(healthBarRoot.transform);
 
         Destroy(fillBar.GetComponent<Collider>());
 
-        fillBar.GetComponent<MeshRenderer>().material = fillMaterial;
-        SetupBarRenderer(fillBar);
+        MeshRenderer fillRenderer = fillBar.GetComponent<MeshRenderer>();
+        fillRenderer.material = fillMaterial;
+        SetupBarRenderer(fillRenderer);
     }
 
-    private void SetupBarRenderer(GameObject barObject)
+    private Material CreateBarMaterial(string materialName, Color color)
     {
-        MeshRenderer meshRenderer = barObject.GetComponent<MeshRenderer>();
+        Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+
+        if (shader == null)
+        {
+            shader = Shader.Find("Standard");
+        }
+
+        if (shader == null)
+        {
+            shader = Shader.Find("Diffuse");
+        }
+
+        Material material = new Material(shader);
+        material.name = materialName;
+        material.color = color;
+
+        if (material.HasProperty("_BaseColor"))
+        {
+            material.SetColor("_BaseColor", color);
+        }
+
+        if (material.HasProperty("_Color"))
+        {
+            material.SetColor("_Color", color);
+        }
+
+        return material;
+    }
+
+    private void SetupBarRenderer(MeshRenderer meshRenderer)
+    {
+        if (meshRenderer == null)
+        {
+            return;
+        }
 
         meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
         meshRenderer.receiveShadows = false;
@@ -83,18 +145,18 @@ public class UnitHealthBar : MonoBehaviour
 
     private void UpdateHealthBarPosition()
     {
-        Vector3 basePosition = transform.position + offset;
-
-        backgroundBar.transform.position = basePosition;
-        fillBar.transform.position = basePosition + new Vector3(0f, 0.01f, -0.01f);
+        healthBarRoot.transform.position = transform.position + offset;
 
         if (mainCamera != null)
         {
-            backgroundBar.transform.rotation = mainCamera.transform.rotation;
-            fillBar.transform.rotation = mainCamera.transform.rotation;
+            healthBarRoot.transform.rotation = mainCamera.transform.rotation;
         }
 
+        backgroundBar.transform.localPosition = Vector3.zero;
+        backgroundBar.transform.localRotation = Quaternion.identity;
         backgroundBar.transform.localScale = new Vector3(barWidth, barHeight, barDepth);
+
+        fillBar.transform.localRotation = Quaternion.identity;
     }
 
     private void UpdateHealthBarValue()
@@ -110,8 +172,10 @@ public class UnitHealthBar : MonoBehaviour
 
         float offsetX = -(barWidth * (1f - hpPercent)) / 2f;
 
-        fillBar.transform.position = backgroundBar.transform.position
-            + backgroundBar.transform.right * offsetX
-            + backgroundBar.transform.forward * -0.03f;
+        fillBar.transform.localPosition = new Vector3(
+            offsetX,
+            0.01f,
+            -0.03f
+        );
     }
 }
